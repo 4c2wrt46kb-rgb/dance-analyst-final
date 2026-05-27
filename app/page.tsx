@@ -18,7 +18,16 @@ interface VideoTab {
 }
 
 export default function VideoAnalyzer() {
-  const [tabs, setTabs] = useState<VideoTab[]>([
+ const [tabs, setTabs] = useState<VideoTab[]>(() => {
+  if (typeof window !== "undefined") {
+    const savedTabs = localStorage.getItem("video-analyzer-tabs");
+
+    if (savedTabs) {
+      return JSON.parse(savedTabs);
+    }
+  }
+
+  return [
     {
       id: "tab-1",
       name: "セッション 1",
@@ -29,8 +38,15 @@ export default function VideoAnalyzer() {
       playbackRate: 1,
       notes: "",
     }
-  ]);
-  const [activeTabId, setActiveTabId] = useState<string>("tab-1");
+  ];
+});
+  const [activeTabId, setActiveTabId] = useState<string>(() => {
+  if (typeof window !== "undefined") {
+    return localStorage.getItem("video-analyzer-active-tab") || "tab-1";
+  }
+
+  return "tab-1";
+});
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -41,7 +57,20 @@ export default function VideoAnalyzer() {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+// 自動保存
+useEffect(() => {
+  localStorage.setItem(
+    "video-analyzer-tabs",
+    JSON.stringify(tabs)
+  );
+}, [tabs]);
 
+useEffect(() => {
+  localStorage.setItem(
+    "video-analyzer-active-tab",
+    activeTabId
+  );
+}, [activeTabId]);
   const updateActiveTab = (updates: Partial<VideoTab>) => {
     setTabs(prev => prev.map(tab => tab.id === activeTabId ? { ...tab, ...updates } : tab));
   };
