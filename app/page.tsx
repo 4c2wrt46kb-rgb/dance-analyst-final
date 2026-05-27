@@ -18,6 +18,27 @@ interface VideoTab {
 }
 
 export default function VideoAnalyzer() {
+  export default function VideoAnalyzer() {
+  // --- ここに追加 ---
+  // 1. 初回起動時にデータを復元
+  useEffect(() => {
+    const saved = localStorage.getItem("choreo-lab-data");
+    if (saved) {
+      try {
+        setTabs(JSON.parse(saved));
+      } catch (e) {
+        console.error("データの読み込みに失敗しました", e);
+      }
+    }
+  }, []);
+
+  // 2. tabs の中身が変わるたびに自動保存
+  useEffect(() => {
+    localStorage.setItem("choreo-lab-data", JSON.stringify(tabs));
+  }, [tabs]);
+  // ------------------
+
+  const [tabs, setTabs] = useState<VideoTab[]>([ ...
   const [tabs, setTabs] = useState<VideoTab[]>([
     {
       id: "tab-1",
