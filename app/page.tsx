@@ -36,6 +36,8 @@ export default function VideoAnalyzer() {
       if (savedTabs) {
         const parsedTabs: VideoTab[] = JSON.parse(savedTabs);
 
+        // リロード時はブラウザの仕様上 Blob URL が切れるため
+        // クラッシュ防止に videoSrc は一度安全に null に初期化する
         return parsedTabs.map((tab) => ({
           ...tab,
           videoSrc: null,
@@ -82,6 +84,7 @@ export default function VideoAnalyzer() {
 
   // 自動保存
   useEffect(() => {
+    // ローカルデータの有効期限が切れる videoSrc 以外（ノートやUI情報）を確実に永続化
     const safeTabs = tabs.map((tab) => ({
       ...tab,
       videoSrc: null,
@@ -358,3 +361,153 @@ export default function VideoAnalyzer() {
       .toString()
       .padStart(2, "0")}`;
   };
+
+  return (
+    <div className="min-h-screen bg-[#0A0A0C] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
+      <div className="w-full max-w-6xl bg-[#121215] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+        
+        {/* ================= タブバー ================= */}
+        <div className="bg-[#16161A] border-b border-zinc-800 p-2 md:p-3 flex items-center justify-between gap-2 overflow-x-auto">
+          <div className="flex items-center gap-1.5 overflow-x-auto max-w-full no-scrollbar">
+            {tabs.map((tab) => (
+              <div
+                key={tab.id}
+                onClick={() => { setActiveTabId(tab.id); setIsPlaying(false); }}
+                className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border ${
+                  tab.id === activeTabId
+                    ? "bg-zinc-800 text-white border-zinc-700 shadow-sm"
+                    : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"
+                }`}
+              >
+                {editingTabId === tab.id ? (
+                  <input
+                    type="text"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={saveRename}
+                    onKeyDown={(e) => e.key === "Enter" && saveRename()}
+                    autoFocus
+                    className="bg-zinc-900 text-white border border-zinc-700 rounded px-1 py-0.5 w-20 text-xs focus:outline-none"
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <span className="flex items-center gap-1" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
+                    {tab.name}
+                    <Edit2 size={10} className="opacity-40" />
+                  </span>
+                )}
+                {tabs.length > 1 && (
+                  <X size={12} className="hover:bg-zinc-700 p-0.5 rounded-full" onClick={(e) => closeTab(tab.id, e)} />
+                )}
+              </div>
+            ))}
+            <button onClick={addNewTab} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400"><Plus size={12} /></button>
+          </div>
+          <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap"><Upload size={12} />動画読込</button>
+          <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="video/*" className="hidden" />
+        </div>
+
+        {/* ================= メインコンテンツエリア ================= */}
+        <div className="flex flex-col lg:flex-row border-b border-zinc-800">
+          
+          {/* 左側：ビデオ表示エリア ＆ コントローラー */}
+          <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
+            <div className="relative aspect-video flex items-center justify-center p-2 overflow-hidden bg-[#050506]">
+              {activeTab.videoSrc ? (
+                <div className="w-full h-full flex items-center justify-center transition-transform duration-300" style={{ transform: `rotate(${activeTab.rotation}deg)` }}>
+                  <video
+                    ref={videoRef}
+                    key={activeTab.id}
+                    src={activeTab.videoSrc || ""}
+                    playsInline
+                    onError={() => {
+                      console.log("動画の有効期限切れを検知しました");
+                      updateActiveTab({ videoSrc: null });
+                    }}
+                    className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onTimeUpdate={() => videoRef.current && setCurrentTime(videoRef.current.currentTime)}
+                    onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)}
+                    onClick={togglePlay}
+                  />
+                  {activeTab.showGrid && (
+                    <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
+                      <div className="border-r border-b border-dashed border-white/50"></div>
+                      <div className="border-r border-b border-dashed border-white/50"></div>
+                      <div className="border-b border-dashed border-white/50"></div>
+                      <div className="border-r border-b border-dashed border-white/50"></div>
+                      <div className="border-r border-b border-dashed border-white/50"></div>
+                      <div className="border-b border-dashed border-white/50"></div>
+                      <div className="border-r border-dashed border-white/50"></div>
+                      <div className="border-r border-dashed border-white/50"></div>
+                      <div></div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center text-zinc-600 gap-2 cursor-pointer text-xs"><Upload size={28} />動画を選択してください</div>
+              )}
+            </div>
+
+            {/* ビデオコントローラー */}
+            {activeTab.videoSrc && (
+              <div className="p-3 md:p-4 bg-[#121215] space-y-3 border-t border-zinc-800/80">
+                {/* シークバー */}
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
+                  <input type="range" min={0} max={duration || 100} step={0.01} value={currentTime} onChange={handleSeek} className="flex-1 accent-white bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                  <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
+                </div>
+
+                {/* 各種操作ボタン群 */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
+                    <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white text-black font-bold shadow-md">{isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}</button>
+                    <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsRight size={14} /></button>
+                  </div>
+
+                  <div className="flex items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 text-[11px]">
+                    <button onClick={() => updateActiveTab({ isMirrored: !activeTab.isMirrored })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.isMirrored ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><FlipHorizontal size={12} />ミラー</button>
+                    <button onClick={toggleRotation} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-amber-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
+                    <button onClick={() => updateActiveTab({ showGrid: !activeTab.showGrid })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.showGrid ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><Grid size={12} />グリッド</button>
+                  </div>
+                </div>
+
+                {/* スピード調整 */}
+                <div className="flex items-center gap-3 pt-1 border-t border-zinc-800/40">
+                  <span className="text-[10px] font-bold text-zinc-500 tracking-wider whitespace-nowrap">SPEED: {activeTab.playbackRate.toFixed(2)}x</span>
+                  <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={handleRateSliderChange} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 右側：メモ＆タイムスタンププレビュー */}
+          <div className="w-full lg:w-[360px] xl:w-[400px] bg-[#121215] flex flex-col p-4 space-y-3 min-h-[300px] lg:min-h-0">
+            <div className="flex items-center gap-2 text-zinc-400 border-b border-zinc-800/60 pb-2">
+              <FileText size={14} />
+              <h2 className="text-xs font-bold tracking-wider uppercase">練習ノート & タイムスタンプ</h2>
+            </div>
+            
+            {/* テキストエディタ欄 */}
+            <textarea
+              value={activeTab.notes}
+              onChange={(e) => updateActiveTab({ notes: e.target.value })}
+              placeholder="例:&#10;1:02 ここの足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！"
+              className="w-full h-24 lg:h-32 bg-[#16161A] border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 resize-none font-sans leading-relaxed"
+            />
+
+            {/* インタラクティブプレビュー */}
+            <div className="flex-1 bg-[#16161A]/50 border border-zinc-800/60 rounded-xl p-3 overflow-y-auto text-xs text-zinc-300 font-sans leading-loose max-h-[200px] lg:max-h-none">
+              {renderNotesWithTimestamps(activeTab.notes)}
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+  );
+}
