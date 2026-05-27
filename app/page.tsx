@@ -3,9 +3,10 @@
 import React, { useState, useRef, useEffect } from "react";
 import { 
   Play, Pause, RotateCw, FlipHorizontal, Grid, 
-  Upload, X, FileText, Edit2, Search, Folder, Calendar, Palette
+  Upload, X, FileText, Edit2, Search, Folder, Calendar, Palette, Plus, ChevronLeft
 } from "lucide-react";
 
+// 型定義
 interface VideoTab {
   id: string;
   name: string;
@@ -27,18 +28,19 @@ export default function VideoAnalyzer() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [showHome, setShowHome] = useState(true);
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
 
-  // 初回起動時にタブがなければ作成
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
-    if (tabs.length === 0) {
-      addNewTab("一般");
-    }
+    if (tabs.length === 0) addNewTab("デフォルト");
   }, []);
 
-  const addNewTab = (folder = "新規フォルダ") => {
+  const addNewTab = (folder = "一般") => {
     const newTab: VideoTab = {
       id: `tab-${Date.now()}`,
-      name: "新しい練習",
+      name: "新しい練習動画",
       folder: folder,
       createdAt: new Date().toLocaleDateString(),
       videoSrc: null,
@@ -54,7 +56,6 @@ export default function VideoAnalyzer() {
     setShowHome(false);
   };
 
-  // 検索・絞り込み
   const filteredTabs = tabs.filter(t => 
     t.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
     t.folder.toLowerCase().includes(searchTerm.toLowerCase())
@@ -62,54 +63,78 @@ export default function VideoAnalyzer() {
 
   const activeTab = tabs.find(t => t.id === activeTabId);
 
-  // 回転と反転のロジック修正: Transformを分ける
-  const getTransform = (rotation: number, isMirrored: boolean) => {
-    const rotate = `rotate(${rotation}deg)`;
-    const scale = isMirrored ? "scaleX(-1)" : "scaleX(1)";
-    return `${rotate} ${scale}`;
+  const updateActiveTab = (updates: Partial<VideoTab>) => {
+    if (!activeTabId) return;
+    setTabs(prev => prev.map(tab => tab.id === activeTabId ? { ...tab, ...updates } : tab));
   };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-zinc-200 p-4 font-sans">
+    <div className="min-h-screen bg-[#050505] text-zinc-200 p-4 md:p-8 font-sans">
       {showHome ? (
         <div className="max-w-4xl mx-auto space-y-6">
           <div className="flex justify-between items-center">
-            <h1 className="text-2xl font-bold">Choreo Lab 3.0</h1>
+            <h1 className="text-2xl font-bold text-white">Choreo Lab v3.0</h1>
             <div className="relative">
               <Search className="absolute left-3 top-2.5 text-zinc-600" size={16} />
               <input 
-                placeholder="検索..." 
-                className="bg-zinc-900 border border-zinc-800 rounded-lg pl-10 pr-4 py-2 text-sm"
+                placeholder="フォルダや動画を検索..." 
+                className="bg-zinc-900 border border-zinc-800 rounded-lg pl-10 pr-4 py-2 text-sm focus:border-zinc-500 outline-none"
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
           </div>
+          
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {filteredTabs.map(tab => (
-              <div key={tab.id} onClick={() => { setActiveTabId(tab.id); setShowHome(false); }} className="bg-zinc-900 p-4 rounded-xl border border-zinc-800 cursor-pointer hover:border-zinc-600">
-                <div className="flex justify-between text-xs text-zinc-500 mb-2"><span>{tab.folder}</span><span>{tab.createdAt}</span></div>
-                <h3 className="font-bold">{tab.name}</h3>
+              <div key={tab.id} onClick={() => { setActiveTabId(tab.id); setShowHome(false); }} className="bg-zinc-900 p-4 rounded-xl border border-zinc-800 cursor-pointer hover:border-zinc-600 transition-all">
+                <div className="flex justify-between text-[10px] text-zinc-500 mb-2">
+                  <span className="bg-zinc-800 px-2 py-0.5 rounded">{tab.folder}</span>
+                  <span>{tab.createdAt}</span>
+                </div>
+                <h3 className="font-bold text-sm truncate">{tab.name}</h3>
               </div>
             ))}
-            <button onClick={() => addNewTab()} className="border-2 border-dashed border-zinc-800 rounded-xl flex items-center justify-center p-8 text-zinc-600 hover:text-zinc-400"><Plus /> 新規作成</button>
+            <button onClick={() => addNewTab()} className="border-2 border-dashed border-zinc-800 rounded-xl flex flex-col items-center justify-center p-8 text-zinc-600 hover:text-zinc-400 transition-colors">
+              <Plus size={24} />
+              <span className="mt-2 text-xs">新規作成</span>
+            </button>
           </div>
         </div>
       ) : (
         <div className="max-w-6xl mx-auto">
-          {/* ここに以前のプレイヤーロジックが入る（簡略化） */}
-          <button onClick={() => setShowHome(true)} className="text-sm mb-4 text-zinc-500">← ホームに戻る</button>
+          <button onClick={() => setShowHome(true)} className="flex items-center text-sm text-zinc-500 hover:text-white mb-4">
+            <ChevronLeft size={16} /> ホームに戻る
+          </button>
+          
           {activeTab && (
-            <div className="relative w-full aspect-video bg-black rounded-xl overflow-hidden">
-               <video
-                 src={activeTab.videoSrc || ""}
-                 className="w-full h-full object-contain"
-                 style={{ transform: getTransform(activeTab.rotation, activeTab.isMirrored) }}
-               />
-               {activeTab.showGrid && (
-                 <div className="absolute inset-0 pointer-events-none" style={{ borderColor: activeTab.gridColor, borderWidth: '2px' }}>
-                    {/* ここにカスタムカラーのグリッド実装 */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 bg-black rounded-2xl overflow-hidden border border-zinc-800 p-4">
+                 <div className="relative aspect-video flex items-center justify-center">
+                    {activeTab.videoSrc ? (
+                      <video 
+                        src={activeTab.videoSrc}
+                        className="w-full h-full object-contain"
+                        style={{ transform: `rotate(${activeTab.rotation}deg) scaleX(${activeTab.isMirrored ? -1 : 1})` }}
+                      />
+                    ) : (
+                      <div onClick={() => fileInputRef.current?.click()} className="text-zinc-600 cursor-pointer text-sm">動画を読み込む</div>
+                    )}
+                    <input type="file" ref={fileInputRef} onChange={(e) => updateActiveTab({ videoSrc: URL.createObjectURL(e.target.files![0]) })} className="hidden" />
                  </div>
-               )}
+              </div>
+              <div className="bg-zinc-900 p-6 rounded-2xl border border-zinc-800">
+                <h2 className="text-lg font-bold mb-4">{activeTab.name}</h2>
+                <div className="flex items-center gap-2 mb-4">
+                   <button onClick={() => updateActiveTab({ isMirrored: !activeTab.isMirrored })} className="p-2 bg-zinc-800 rounded-lg"><FlipHorizontal size={18} /></button>
+                   <button onClick={() => updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 })} className="p-2 bg-zinc-800 rounded-lg"><RotateCw size={18} /></button>
+                </div>
+                <textarea 
+                  value={activeTab.notes} 
+                  onChange={(e) => updateActiveTab({ notes: e.target.value })}
+                  className="w-full h-40 bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-sm focus:outline-none"
+                  placeholder="メモを入力..."
+                />
+              </div>
             </div>
           )}
         </div>
