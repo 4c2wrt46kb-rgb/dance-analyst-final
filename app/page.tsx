@@ -156,8 +156,7 @@ useEffect(() => {
     videoRef.current.pause();
     setIsPlaying(false);
     videoRef.current.currentTime += direction === "forward" ? 1 / 30 : -1 / 30;
-  };
-
+  }
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!videoRef.current) return;
     const time = parseFloat(e.target.value);
@@ -282,17 +281,18 @@ useEffect(() => {
               {activeTab.videoSrc ? (
                 <div className="w-full h-full flex items-center justify-center transition-transform duration-300" style={{ transform: `rotate(${activeTab.rotation}deg)` }}>
                   <video
-                    ref={videoRef}
-                    key={activeTab.id}
-                    src={activeTab.videoSrc}
-                    playsInline
-                    className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onTimeUpdate={() => videoRef.current && setCurrentTime(videoRef.current.currentTime)}
-                    onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)}
-                    onClick={togglePlay}
-                  />
+  ref={videoRef}
+  key={activeTab.id}
+  src={activeTab.videoSrc || ""}
+  playsInline
+  // 【ここを追加！】読み込み失敗時に自動で URL を null に戻す
+  onError={() => {
+    console.log("動画データの期限切れを検知しました");
+    updateActiveTab({ videoSrc: null });
+  }}
+  className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
+  // ...以下同じ
+/>
                   {/* 濃くしたグリッド線 (border-white/50) */}
                   {activeTab.showGrid && (
                     <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
