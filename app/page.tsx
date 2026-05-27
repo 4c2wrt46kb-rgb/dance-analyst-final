@@ -164,7 +164,7 @@ export default function DanceAnalystPro() {
                 <React.Fragment key={node.id}>
                   <div className="relative group animate-in fade-in zoom-in duration-300">
                     <div className="px-6 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-sm font-bold shadow-xl flex items-center gap-3">
-                      <Hash size={12} className="text-indigo-400"/> {node.name}
+                      <div className="text-indigo-400">{node.name}</div>
                       <button onClick={() => setNodes(nodes.filter(n => n.id !== node.id))} className="text-slate-600 hover:text-red-400 ml-2 transition-colors"><Trash2 size={12}/></button>
                     </div>
                   </div>
