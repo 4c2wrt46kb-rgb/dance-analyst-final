@@ -9,13 +9,15 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Upload,
-  Plus,
   X,
   RotateCw,
   FileText,
   Edit2,
   Folder,
   Clock,
+  Settings2,
+  RefreshCw,
+  Plus,
 } from "lucide-react";
 
 interface VideoTab {
@@ -27,33 +29,28 @@ interface VideoTab {
   showGrid: boolean;
   playbackRate: number;
   notes: string;
-  category: string; // 【追加】フォルダ（カテゴリ）分類用
+  category: string;
+  loopStart: number | null;
+  loopEnd: number | null;
 }
 
 const DB_NAME = "video-analyzer-db";
 const STORE_NAME = "videos";
 
-// 固定のフォルダ（カテゴリ）リスト
-const CATEGORIES = ["すべて", "フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"];
-
-// IndexedDB のオープン
 const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
-
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
     };
-
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 };
 
-// 動画ファイルを保存
 const saveVideoToDB = async (id: string, file: File) => {
   const db = await openDB();
   return new Promise<void>((resolve, reject) => {
@@ -64,7 +61,6 @@ const saveVideoToDB = async (id: string, file: File) => {
   });
 };
 
-// 動画ファイルを取得
 const getVideoFromDB = async (id: string): Promise<File | null> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -75,7 +71,6 @@ const getVideoFromDB = async (id: string): Promise<File | null> => {
   });
 };
 
-// 動画ファイルを削除
 const deleteVideoFromDB = async (id: string) => {
   const db = await openDB();
   return new Promise<void>((resolve, reject) => {
@@ -87,7 +82,14 @@ const deleteVideoFromDB = async (id: string) => {
 };
 
 export default function VideoAnalyzer() {
-  // 保存データ読み込み
+  const [categories, setCategories] = useState<string[]>(() => {
+    if (typeof window !== "undefined") {
+      const savedCats = localStorage.getItem("video-analyzer-categories");
+      if (savedCats) return JSON.parse(savedCats);
+    }
+    return ["フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"];
+  });
+
   const [tabs, setTabs] = useState<VideoTab[]>(() => {
     if (typeof window !== "undefined") {
       const savedTabs = localStorage.getItem("video-analyzer-tabs");
@@ -96,11 +98,12 @@ export default function VideoAnalyzer() {
         return parsedTabs.map((tab) => ({
           ...tab,
           videoSrc: null,
-          category: tab.category || "その他", // 互換性担保
+          category: tab.category || "その他",
+          loopStart: tab.loopStart !== undefined ? tab.loopStart : null,
+          loopEnd: tab.loopEnd !== undefined ? tab.loopEnd : null,
         }));
       }
     }
-
     return [
       {
         id: "tab-1",
@@ -112,11 +115,12 @@ export default function VideoAnalyzer() {
         playbackRate: 1,
         notes: "",
         category: "その他",
+        loopStart: null,
+        loopEnd: null,
       },
     ];
   });
 
-  // アクティブタブ保存
   const [activeTabId, setActiveTabId] = useState<string>(() => {
     if (typeof window !== "undefined") {
       return localStorage.getItem("video-analyzer-active-tab") || "tab-1";
@@ -124,65 +128,29 @@ export default function VideoAnalyzer() {
     return "tab-1";
   });
 
-  // 【追加】現在選択されているフォルダ（カテゴリ）のステート
   const [currentCategory, setCurrentCategory] = useState("すべて");
-
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [isManagingCats, setIsManagingCats] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
-
-  // フォルダ（カテゴリ）でフィルタリングされたタブ一覧
   const filteredTabs = tabs.filter(
     (tab) => currentCategory === "すべて" || tab.category === currentCategory
   );
 
-  // フォルダを切り替えた時、現在のアクティブタブがそのフォルダ内に無ければ、自動でフォルダ内の先頭タブに切り替える
-  const handleCategoryChange = (cat: string) => {
-    setCurrentCategory(cat);
-    const matches = tabs.filter((t) => cat === "すべて" || t.category === cat);
-    if (matches.length > 0 && !matches.some((t) => t.id === activeTabId)) {
-      setActiveTabId(matches[0].id);
-    }
-  };
-
-  // アプリ起動時に全タブの動画を一括復元するロジック
   useEffect(() => {
-    const restoreVideos = async () => {
-      try {
-        const updatedTabs = await Promise.all(
-          tabs.map(async (tab) => {
-            const file = await getVideoFromDB(tab.id);
-            if (!file) return tab;
+    localStorage.setItem("video-analyzer-categories", JSON.stringify(categories));
+  }, [categories]);
 
-            return {
-              ...tab,
-              videoSrc: URL.createObjectURL(file),
-            };
-          })
-        );
-        setTabs(updatedTabs);
-      } catch (err) {
-        console.error("動画の一括復元に失敗しました:", err);
-      }
-    };
-
-    restoreVideos();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 自動保存（localStorageにはUI状態、ノート、カテゴリだけを安全に保存）
   useEffect(() => {
-    const safeTabs = tabs.map((tab) => ({
-      ...tab,
-      videoSrc: null,
-    }));
+    const safeTabs = tabs.map((tab) => ({ ...tab, videoSrc: null }));
     localStorage.setItem("video-analyzer-tabs", JSON.stringify(safeTabs));
   }, [tabs]);
 
@@ -190,34 +158,92 @@ export default function VideoAnalyzer() {
     localStorage.setItem("video-analyzer-active-tab", activeTabId);
   }, [activeTabId]);
 
+  useEffect(() => {
+    const restoreVideos = async () => {
+      try {
+        const updatedTabs = await Promise.all(
+          tabs.map(async (tab) => {
+            const file = await getVideoFromDB(tab.id);
+            if (!file) return tab;
+            return { ...tab, videoSrc: URL.createObjectURL(file) };
+          })
+        );
+        setTabs(updatedTabs);
+      } catch (err) {
+        console.error("動画の復元に失敗しました:", err);
+      }
+    };
+    restoreVideos();
+  }, []);
+
   const updateActiveTab = (updates: Partial<VideoTab>) => {
     setTabs((prev) =>
       prev.map((tab) => (tab.id === activeTabId ? { ...tab, ...updates } : tab))
     );
   };
 
-  // タブ切り替え時のリセット
   useEffect(() => {
     setIsPlaying(false);
   }, [activeTabId]);
 
-  // ビデオ要素の再生速度同期
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.playbackRate = activeTab.playbackRate;
-      setCurrentTime(videoRef.current.currentTime || 0);
     }
   }, [activeTabId, activeTab.playbackRate, activeTab.videoSrc]);
 
-  // 【追加】現在の再生時間をメモにワンプッシュ挿入する関数
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return;
+    const time = videoRef.current.currentTime;
+    setCurrentTime(time);
+
+    if (activeTab.loopStart !== null && activeTab.loopEnd !== null) {
+      if (time >= activeTab.loopEnd) {
+        videoRef.current.currentTime = activeTab.loopStart;
+      }
+    }
+  };
+
+  const addCategory = () => {
+    const trimmed = newCatName.trim();
+    if (trimmed && !categories.includes(trimmed) && trimmed !== "すべて") {
+      setCategories([...categories, trimmed]);
+      setNewCatName("");
+    }
+  };
+
+  const deleteCategory = (catToDelete: string) => {
+    if (categories.length <= 1) return;
+    setCategories(categories.filter((c) => c !== catToDelete));
+    setTabs((prev) =>
+      prev.map((t) => (t.category === catToDelete ? { ...t, category: "その他" } : t))
+    );
+    if (currentCategory === catToDelete) {
+      setCurrentCategory("すべて");
+    }
+  };
+
+  const setLoopPoint = (type: "start" | "end") => {
+    if (!videoRef.current) return;
+    const time = videoRef.current.currentTime;
+    if (type === "start") {
+      updateActiveTab({ loopStart: time });
+    } else {
+      if (activeTab.loopStart === null || time > activeTab.loopStart) {
+        updateActiveTab({ loopEnd: time });
+      }
+    }
+  };
+
+  const clearLoop = () => {
+    updateActiveTab({ loopStart: null, loopEnd: null });
+  };
+
   const insertTimestamp = () => {
     if (!videoRef.current) return;
     const timeStr = formatTime(videoRef.current.currentTime);
-    
-    // 現在のメモの末尾に、綺麗に改行を挟んで挿入する
     const hasNewline = activeTab.notes.endsWith("\n") || activeTab.notes === "";
     const newNotes = activeTab.notes + (hasNewline ? "" : "\n") + `${timeStr} `;
-    
     updateActiveTab({ notes: newNotes });
   };
 
@@ -232,36 +258,28 @@ export default function VideoAnalyzer() {
       showGrid: false,
       playbackRate: 1,
       notes: "",
-      category: currentCategory === "すべて" ? "その他" : currentCategory, // いま開いているフォルダをデフォルトにする親切設計
+      category: currentCategory === "すべて" ? (categories[0] || "その他") : currentCategory,
+      loopStart: null,
+      loopEnd: null,
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(newId);
     setIsPlaying(false);
   };
 
-  // タブを閉じる際、IndexedDB の中の該当動画も一緒に削除する
   const closeTab = async (idToClose: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
-
     const filtered = tabs.filter((tab) => tab.id !== idToClose);
     setTabs(filtered);
-
     if (activeTabId === idToClose) {
-      // フィルター後の表示中タブから次なるアクティブを選ぶ
-      const remMatches = filtered.filter((t) => currentCategory === "すべて" || t.category === currentCategory);
-      if (remMatches.length > 0) {
-        setActiveTabId(remMatches[remMatches.length - 1].id);
-      } else if (filtered.length > 0) {
-        setActiveTabId(filtered[filtered.length - 1].id);
-      }
+      setActiveTabId(filtered[filtered.length - 1].id);
     }
     setIsPlaying(false);
-
     try {
       await deleteVideoFromDB(idToClose);
     } catch (err) {
-      console.error("IndexedDBからの動画削除に失敗しました:", err);
+      console.error(err);
     }
   };
 
@@ -284,17 +302,12 @@ export default function VideoAnalyzer() {
     const file = e.target.files?.[0];
     if (file) {
       const url = URL.createObjectURL(file);
-      
-      updateActiveTab({
-        videoSrc: url,
-        name: file.name.substring(0, 10),
-      });
+      updateActiveTab({ videoSrc: url, name: file.name.substring(0, 10) });
       setIsPlaying(false);
-
       try {
         await saveVideoToDB(activeTabId, file);
       } catch (err) {
-        console.error("IndexedDBへの動画保存に失敗しました:", err);
+        console.error(err);
       }
     }
   };
@@ -309,30 +322,11 @@ export default function VideoAnalyzer() {
     setIsPlaying(!isPlaying);
   };
 
-  const handleRateSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const rate = parseFloat(e.target.value);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = rate;
-    }
-    updateActiveTab({ playbackRate: rate });
-  };
-
-  const toggleRotation = () => {
-    updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 });
-  };
-
   const stepFrame = (direction: "forward" | "backward") => {
     if (!videoRef.current) return;
     videoRef.current.pause();
     setIsPlaying(false);
     videoRef.current.currentTime += direction === "forward" ? 1 / 30 : -1 / 30;
-  };
-
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!videoRef.current) return;
-    const time = parseFloat(e.target.value);
-    videoRef.current.currentTime = time;
-    setCurrentTime(time);
   };
 
   const jumpToTime = (seconds: number) => {
@@ -346,52 +340,27 @@ export default function VideoAnalyzer() {
   };
 
   const renderNotesWithTimestamps = (text: string) => {
-    if (!text) {
-      return (
-        <span className="text-zinc-600 text-xs">
-          ここにメモを入力するか、上の「⏱️ タイムスタンプ」を押すと自動生成されます。
-        </span>
-      );
-    }
-
-    const lines = text.split("\n");
-    return lines.map((line, i) => {
+    if (!text) return <span className="text-zinc-600 text-xs">ここにメモを入力するか、「⏱️ タイムスタンプ挿入」を押してください。</span>;
+    return text.split("\n").map((line, i) => {
       const timestampRegex = /(\d{1,2}):(\d{2})/g;
       const parts = [];
       let lastIndex = 0;
       let match;
-
       while ((match = timestampRegex.exec(line)) !== null) {
         const matchIndex = match.index;
-        if (matchIndex > lastIndex) {
-          parts.push(line.substring(lastIndex, matchIndex));
-        }
-
+        if (matchIndex > lastIndex) { parts.push(line.substring(lastIndex, matchIndex)); }
         const mins = parseInt(match[1], 10);
         const secs = parseInt(match[2], 10);
         const totalSeconds = mins * 60 + secs;
-
         parts.push(
-          <button
-            key={matchIndex}
-            onClick={() => jumpToTime(totalSeconds)}
-            className="text-amber-400 hover:text-amber-300 font-mono font-bold underline bg-amber-500/10 px-1 rounded transition-colors inline-block my-0.5 mx-0.5"
-          >
+          <button key={matchIndex} onClick={() => jumpToTime(totalSeconds)} className="text-amber-400 hover:text-amber-300 font-mono font-bold underline bg-amber-500/10 px-1 rounded mx-0.5 inline-block">
             {match[0]}
           </button>
         );
         lastIndex = timestampRegex.lastIndex;
       }
-
-      if (lastIndex < line.length) {
-        parts.push(line.substring(lastIndex));
-      }
-
-      return (
-        <div key={i} className="min-h-[1.5rem] break-all">
-          {parts.length > 0 ? parts : line}
-        </div>
-      );
+      if (lastIndex < line.length) { parts.push(line.substring(lastIndex)); }
+      return <div key={i} className="min-h-[1.5rem] break-all">{parts.length > 0 ? parts : line}</div>;
     });
   };
 
@@ -402,46 +371,90 @@ export default function VideoAnalyzer() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0A0C] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
+    <div className="min-h-screen text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
       <div className="w-full max-w-6xl bg-[#121215] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
         
-        {/* ================= 【新機能】フォルダ（カテゴリ）切り替えバー ================= */}
-        <div className="bg-[#1a1a22] border-b border-zinc-800 p-2 flex items-center gap-1 overflow-x-auto no-scrollbar">
-          <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs">
-            <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
-              <Folder size={12} className="text-amber-400" />
-              <span>フォルダ:</span>
+        {/* フォルダバー */}
+        <div className="bg-[#1a1a22] border-b border-zinc-800 p-2 flex flex-col md:flex-row md:items-center gap-2 justify-between">
+          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+            <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs whitespace-nowrap">
+              <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
+                <Folder size={12} className="text-amber-400" />
+                <span>フォルダ:</span>
+              </div>
+              <button onClick={() => setCurrentCategory("すべて")} className={`px-3 py-1 rounded-lg font-medium transition-all ${currentCategory === "すべて" ? "bg-amber-500 text-black font-bold" : "text-zinc-400 hover:text-zinc-200"}`}>すべて</button>
+              {categories.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setCurrentCategory(cat)}
+                  className={`px-3 py-1 rounded-lg font-medium transition-all ${
+                    currentCategory === cat ? "bg-amber-500 text-black font-bold shadow-md" : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
             </div>
-            {CATEGORIES.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => handleCategoryChange(cat)}
-                className={`px-3 py-1 rounded-lg font-medium transition-all ${
-                  currentCategory === cat
-                    ? "bg-amber-500 text-black font-bold shadow-md"
-                    : "text-zinc-400 hover:text-zinc-200"
-                }`}
-              >
-                {cat}
-              </button>
-            ))}
           </div>
-          <span className="text-[10px] text-zinc-500 ml-auto hidden md:inline px-2">
-            ※ダブルクリック（またはタップ）で名前と所属フォルダを変更可能
-          </span>
+
+          <div className="flex items-center gap-2 self-end md:self-auto">
+            <button
+              onClick={() => setIsManagingCats(!isManagingCats)}
+              className={`p-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${
+                isManagingCats ? "bg-zinc-700 border-zinc-500 text-white" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <Settings2 size={12} />
+              <span>フォルダ編集</span>
+            </button>
+          </div>
         </div>
 
-        {/* ================= タブバー ================= */}
+        {/* フォルダ管理パネル */}
+        {isManagingCats && (
+          <div className="bg-[#15151a] border-b border-zinc-800 p-3 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                placeholder="新しいフォルダ名"
+                value={newCatName}
+                onChange={(e) => setNewCatName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addCategory()}
+                className="bg-zinc-900 text-xs text-white border border-zinc-800 rounded-xl px-3 py-1.5 focus:outline-none"
+              />
+              <button onClick={addCategory} className="bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} />追加</button>
+            </div>
+            <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-800/40">
+              {categories.map((cat) => (
+                <div key={cat} className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300">
+                  <input
+                    type="text"
+                    value={cat}
+                    onChange={(e) => {
+                      const newName = e.target.value;
+                      setCategories(categories.map((c) => (c === cat ? newName : c)));
+                      setTabs(tabs.map((t) => (t.category === cat ? { ...t, category: newName } : t)));
+                    }}
+                    className="bg-transparent font-medium focus:outline-none w-20 md:w-24 text-zinc-200"
+                  />
+                  {categories.length > 1 && (
+                    <X size={12} className="text-zinc-500 hover:text-red-400 cursor-pointer ml-1" onClick={() => deleteCategory(cat)} />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* タブバー */}
         <div className="bg-[#16161A] border-b border-zinc-800 p-2 md:p-3 flex items-center justify-between gap-2 overflow-x-auto">
           <div className="flex items-center gap-1.5 overflow-x-auto max-w-full no-scrollbar">
             {filteredTabs.map((tab) => (
               <div
                 key={tab.id}
-                onClick={() => { setActiveTabId(tab.id); }}
-                className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border ${
-                  tab.id === activeTabId
-                    ? "bg-zinc-800 text-white border-zinc-700 shadow-sm"
-                    : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"
+                onClick={() => setActiveTabId(tab.id)}
+                className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border shrink-0 ${
+                  tab.id === activeTabId ? "bg-zinc-800 text-white border-zinc-700 shadow-sm" : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"
                 }`}
               >
                 {editingTabId === tab.id ? (
@@ -453,27 +466,24 @@ export default function VideoAnalyzer() {
                       onBlur={saveRename}
                       onKeyDown={(e) => e.key === "Enter" && saveRename()}
                       autoFocus
-                      className="bg-zinc-900 text-white border border-zinc-700 rounded px-1 py-0.5 w-20 text-xs focus:outline-none"
+                      className="bg-zinc-900 text-white border border-zinc-700 rounded px-1.5 py-0.5 w-20 text-xs focus:outline-none"
                     />
-                    {/* 【新機能】編集モード時に所属フォルダをセレクトボックスで変更可能 */}
                     <select
                       value={tab.category}
                       onChange={(e) => {
                         const newCat = e.target.value;
-                        setTabs((prev) =>
-                          prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t))
-                        );
+                        setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t)));
                       }}
-                      className="bg-zinc-900 text-zinc-300 border border-zinc-700 rounded px-1 py-0.5 text-[10px] focus:outline-none cursor-pointer"
+                      className="bg-zinc-950 text-amber-400 border border-zinc-800 rounded px-1 py-0.5 text-[10px] font-bold focus:outline-none"
                     >
-                      {CATEGORIES.filter(c => c !== "すべて").map((c) => (
+                      {categories.map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
                   </div>
                 ) : (
                   <span className="flex items-center gap-1.5" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
-                    <span className="text-[10px] px-1 py-0.2 bg-zinc-900 rounded text-zinc-400 border border-zinc-700/60 font-mono">{tab.category}</span>
+                    <span className="text-[9px] font-bold px-1 py-0.2 bg-zinc-950 rounded text-amber-400 border border-zinc-800/80 font-mono uppercase">{tab.category}</span>
                     {tab.name}
                     <Edit2 size={10} className="opacity-40" />
                   </span>
@@ -483,19 +493,14 @@ export default function VideoAnalyzer() {
                 )}
               </div>
             ))}
-            {filteredTabs.length === 0 && (
-              <span className="text-xs text-zinc-600 px-2">このフォルダは空です</span>
-            )}
-            <button onClick={addNewTab} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400"><Plus size={12} /></button>
+            <button onClick={addNewTab} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 shrink-0"><Plus size={12} /></button>
           </div>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap"><Upload size={12} />動画読込</button>
           <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="video/*" className="hidden" />
         </div>
 
-        {/* ================= メインコンテンツエリア ================= */}
+        {/* メインコンテンツ */}
         <div className="flex flex-col lg:flex-row border-b border-zinc-800">
-          
-          {/* 左側：ビデオ表示エリア ＆ コントローラー */}
           <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
             <div className="relative aspect-video flex items-center justify-center p-2 overflow-hidden bg-[#050506]">
               {activeTab.videoSrc ? (
@@ -505,13 +510,10 @@ export default function VideoAnalyzer() {
                     key={activeTab.id}
                     src={activeTab.videoSrc || ""}
                     playsInline
-                    onError={() => {
-                      console.log("動画のロード中、または有効期限切れを検知しました");
-                    }}
                     className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
-                    onTimeUpdate={() => videoRef.current && setCurrentTime(videoRef.current.currentTime)}
+                    onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)}
                     onClick={togglePlay}
                   />
@@ -528,23 +530,27 @@ export default function VideoAnalyzer() {
                       <div></div>
                     </div>
                   )}
+                  {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
+                    <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-amber-400 z-20 flex items-center gap-1.5 border border-amber-500/30">
+                      <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
+                      <span>LOOP: {activeTab.loopStart !== null ? formatTime(activeTab.loopStart) : "--:--"} → {activeTab.loopEnd !== null ? formatTime(activeTab.loopEnd) : "--:--"}</span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center text-zinc-600 gap-2 cursor-pointer text-xs"><Upload size={28} />動画を選択してください</div>
               )}
             </div>
 
-            {/* ビデオコントローラー */}
+            {/* コントローラー */}
             {activeTab.videoSrc && (
               <div className="p-3 md:p-4 bg-[#121215] space-y-3 border-t border-zinc-800/80">
-                {/* シークバー */}
                 <div className="flex items-center gap-3">
                   <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
-                  <input type="range" min={0} max={duration || 100} step={0.01} value={currentTime} onChange={handleSeek} className="flex-1 accent-white bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                  <input type="range" min={0} max={duration || 100} step={0.01} value={currentTime} onChange={(e) => { if (videoRef.current) videoRef.current.currentTime = parseFloat(e.target.value); }} className="flex-1 accent-white bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                   <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
                 </div>
 
-                {/* 各種操作ボタン群 */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex items-center gap-1.5">
                     <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
@@ -552,58 +558,52 @@ export default function VideoAnalyzer() {
                     <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsRight size={14} /></button>
                   </div>
 
+                  <div className="flex items-center bg-zinc-950 p-0.5 rounded-xl border border-zinc-800 text-[10px] font-bold">
+                    <button onClick={() => setLoopPoint("start")} className={`px-2 py-1 rounded-lg ${activeTab.loopStart !== null ? "bg-amber-500/20 text-amber-400" : "text-zinc-500 hover:text-zinc-300"}`}>[A点] 開始</button>
+                    <button onClick={() => setLoopPoint("end")} className={`px-2 py-1 rounded-lg ${activeTab.loopEnd !== null ? "bg-amber-500/20 text-amber-400" : "text-zinc-500 hover:text-zinc-300"}`}>[B点] 終了</button>
+                    {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
+                      <button onClick={clearLoop} className="px-2 py-1 rounded-lg text-red-400 hover:bg-red-500/10">解除</button>
+                    )}
+                  </div>
+
                   <div className="flex items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 text-[11px]">
                     <button onClick={() => updateActiveTab({ isMirrored: !activeTab.isMirrored })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.isMirrored ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><FlipHorizontal size={12} />ミラー</button>
-                    <button onClick={toggleRotation} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-amber-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
+                    <button onClick={() => updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-amber-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
                     <button onClick={() => updateActiveTab({ showGrid: !activeTab.showGrid })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.showGrid ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><Grid size={12} />グリッド</button>
                   </div>
                 </div>
 
-                {/* スピード調整 */}
                 <div className="flex items-center gap-3 pt-1 border-t border-zinc-800/40">
                   <span className="text-[10px] font-bold text-zinc-500 tracking-wider whitespace-nowrap">SPEED: {activeTab.playbackRate.toFixed(2)}x</span>
-                  <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={handleRateSliderChange} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                  <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                 </div>
               </div>
             )}
           </div>
 
-          {/* 右側：メモ＆タイムスタンププレビュー */}
+          {/* 右側：メモ */}
           <div className="w-full lg:w-[360px] xl:w-[400px] bg-[#121215] flex flex-col p-4 space-y-3 min-h-[300px] lg:min-h-0">
-            
-            {/* メモ帳ヘッダー ＆ 【新機能】タイムスタンプ一発挿入ボタン */}
             <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2 gap-2">
               <div className="flex items-center gap-2 text-zinc-400">
                 <FileText size={14} />
                 <h2 className="text-xs font-bold tracking-wider uppercase">練習ノート</h2>
               </div>
-              
-              {/* ⏱️ タイムスタンプ一発挿入ボタン */}
               {activeTab.videoSrc && (
-                <button
-                  onClick={insertTimestamp}
-                  className="flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"
-                >
-                  <Clock size={12} />
-                  <span>タイムスタンプ挿入</span>
-                </button>
+                <button onClick={insertTimestamp} className="flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"><Clock size={12} /><span>タイムスタンプ挿入</span></button>
               )}
             </div>
             
-            {/* テキストエディタ欄 */}
             <textarea
               value={activeTab.notes}
               onChange={(e) => updateActiveTab({ notes: e.target.value })}
               placeholder="例:&#10;1:02 ここの足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！"
-              className="w-full h-24 lg:h-32 bg-[#16161A] border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 resize-none font-sans leading-relaxed"
+              className="w-full h-24 lg:h-32 bg-[#16161A] border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none font-sans leading-relaxed"
             />
 
-            {/* インタラクティブプレビュー */}
             <div className="flex-1 bg-[#16161A]/50 border border-zinc-800/60 rounded-xl p-3 overflow-y-auto text-xs text-zinc-300 font-sans leading-loose max-h-[200px] lg:max-h-none">
               {renderNotesWithTimestamps(activeTab.notes)}
             </div>
           </div>
-
         </div>
 
       </div>
