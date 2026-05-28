@@ -210,12 +210,9 @@ const RenderGoalNode = ({
 };
 
 export default function VideoAnalyzer() {
-  // 🌟 ハイドレーション＆上書きバグ防止用の読み込み完了フラグ
   const [isLoaded, setIsLoaded] = useState(false);
-  
   const [view, setView] = useState<"home" | "analyzer" | "goals">("home");
 
-  // 初期値は固定のデフォルト値に統一
   const [goalRoot, setGoalRoot] = useState<GoalNode>({
     id: "root",
     text: "ここに大目標を入力（例：〇〇のバトルで優勝する）",
@@ -282,7 +279,6 @@ export default function VideoAnalyzer() {
     (tab) => currentCategory === "すべて" || tab.category === currentCategory
   );
 
-  // 🌟 【修正】マウント時に一度だけ安全にlocalStorageとIndexedDBからデータを復元
   useEffect(() => {
     const savedGoals = localStorage.getItem("video-analyzer-goals");
     if (savedGoals) setGoalRoot(JSON.parse(savedGoals));
@@ -333,14 +329,12 @@ export default function VideoAnalyzer() {
       } catch (err) {
         console.error("動画復元失敗", err);
       } finally {
-        // 全ての復元処理が終わってから「読み込み完了フラグ」をtrueにする
         setIsLoaded(true);
       }
     };
     restoreVideos();
   }, []);
 
-  // 🌟 【修正】読み込みが完了（isLoaded === true）するまでは自動保存を発動させない
   useEffect(() => {
     if (!isLoaded) return;
     localStorage.setItem("video-analyzer-categories", JSON.stringify(categories));
@@ -370,7 +364,6 @@ export default function VideoAnalyzer() {
     };
   }, []);
 
-  // 🌟 読み込みが終わる前の一瞬のチラつきや不完全な状態での挙動を防ぐ
   if (!isLoaded) {
     return <div className="min-h-screen bg-[#0b0b0f]" />;
   }
@@ -501,7 +494,7 @@ export default function VideoAnalyzer() {
       showGrid: false,
       playbackRate: 1,
       notes: "",
-      category: defaultCategory || (currentCategory === "すべて" ? (categories[0] || "その他") : currentCategory),
+      category: defaultCategory || (currentCategory === "すべて" ? (categories[0] || "sound") : currentCategory),
       loopStart: null,
       loopEnd: null,
       zoom: 1,
@@ -973,7 +966,7 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          {/* フォルダ管理パネル */}
+          {/* 📂 【バグ修正対象】フォルダ管理パネル */}
           {isManagingCats && (
             <div className="bg-[#0b0b0f] border-b border-zinc-850 p-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
@@ -983,11 +976,33 @@ export default function VideoAnalyzer() {
               <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-850/40">
                 {categories.map((cat) => (
                   <div key={cat} className="flex items-center gap-1 bg-[#121218] border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300">
-                    <input type="text" value={cat} onChange={(e) => {
-                      const newName = e.target.value;
-                      setCategories(categories.map((c) => (c === cat ? newName : c)));
-                      setTabs(tabs.map((t) => (t.category === cat ? { ...t, category: newName } : t)));
-                    }} className="bg-transparent font-medium focus:outline-none w-20 md:w-24 text-zinc-200" />
+                    <input 
+                      type="text" 
+                      defaultValue={cat} 
+                      onBlur={(e) => {
+                        const newName = e.target.value.trim();
+                        // 空文字、または何も変わっていない場合は無視して元の値に戻す
+                        if (!newName || newName === cat) {
+                          e.target.value = cat;
+                          return;
+                        }
+                        // すでに存在する名前への重複チェック
+                        if (categories.includes(newName)) {
+                          alert("そのフォルダ名は既に存在します");
+                          e.target.value = cat;
+                          return;
+                        }
+                        // 確定したタイミングで一括更新
+                        setCategories(categories.map((c) => (c === cat ? newName : c)));
+                        setTabs(tabs.map((t) => (t.category === cat ? { ...t, category: newName } : t)));
+                        if (currentCategory === cat) setCurrentCategory(newName);
+                      }}
+                      onKeyDown={(e) => {
+                        // Enterキーが押されたら強制的にフォーカスアウトさせて確定させる
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      className="bg-transparent font-medium focus:outline-none w-20 md:w-24 text-zinc-200 border-b border-transparent focus:border-cyan-500/50 transition-all" 
+                    />
                     {categories.length > 1 && <X size={12} className="text-zinc-500 hover:text-red-400 cursor-pointer ml-1" onClick={() => deleteCategory(cat)} />}
                   </div>
                 ))}
