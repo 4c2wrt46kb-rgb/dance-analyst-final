@@ -24,6 +24,7 @@ import {
   Download,
 } from "lucide-react";
 
+// ① VideoTab インターフェース（videoId を追加）
 interface VideoTab {
   id: string;
   name: string;
@@ -39,13 +40,19 @@ interface VideoTab {
   zoom: number;
   panX: number;
   panY: number;
+  videoId?: string; 
 }
 
+// ② IndexedDB 安全版
 const DB_NAME = "video-analyzer-db";
 const STORE_NAME = "videos";
 
 const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !window.indexedDB) {
+      reject("IndexedDB unsupported");
+      return;
+    }
     const request = indexedDB.open(DB_NAME, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -97,6 +104,7 @@ export default function VideoAnalyzer() {
     return ["フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"];
   });
 
+  // ③ localStorage 復元修正（videoId に対応）
   const [tabs, setTabs] = useState<VideoTab[]>(() => {
     if (typeof window !== "undefined") {
       const savedTabs = localStorage.getItem("video-analyzer-tabs");
@@ -111,6 +119,7 @@ export default function VideoAnalyzer() {
           zoom: tab.zoom !== undefined ? tab.zoom : 1,
           panX: tab.panX !== undefined ? tab.panX : 0,
           panY: tab.panY !== undefined ? tab.panY : 0,
+          videoId: tab.videoId,
         }));
       }
     }
@@ -130,6 +139,7 @@ export default function VideoAnalyzer() {
         zoom: 1,
         panX: 0,
         panY: 0,
+        videoId: undefined,
       },
     ];
   });
@@ -149,10 +159,16 @@ export default function VideoAnalyzer() {
   const [editName, setEditName] = useState("");
   const [isManagingCats, setIsManagingCats] = useState(false);
   const [newCatName, setNewCatName] = useState("");
-  const [showZoomPanel, setShowZoomPanel] = useState(false); // ズームパネル開閉状態
+  const [showZoomPanel, setShowZoomPanel] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // トラップ回避用：常に最新のtabsを追跡するRef
+  const tabsRef = useRef(tabs);
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
   const filteredTabs = tabs.filter(
@@ -163,6 +179,7 @@ export default function VideoAnalyzer() {
     localStorage.setItem("video-analyzer-categories", JSON.stringify(categories));
   }, [categories]);
 
+  // ④ localStorage 保存
   useEffect(() => {
     const safeTabs = tabs.map((tab) => ({ ...tab, videoSrc: null }));
     localStorage.setItem("video-analyzer-tabs", JSON.stringify(safeTabs));
@@ -172,22 +189,35 @@ export default function VideoAnalyzer() {
     localStorage.setItem("video-analyzer-active-tab", activeTabId);
   }, [activeTabId]);
 
+  // ⑤ 起動時動画復元 (tab.videoId から安全に復元)
   useEffect(() => {
     const restoreVideos = async () => {
       try {
         const updatedTabs = await Promise.all(
           tabs.map(async (tab) => {
-            const file = await getVideoFromDB(tab.id);
+            if (!tab.videoId) return tab;
+            const file = await getVideoFromDB(tab.videoId);
             if (!file) return tab;
             return { ...tab, videoSrc: URL.createObjectURL(file) };
           })
         );
         setTabs(updatedTabs);
       } catch (err) {
-        console.error("動画の復元に失敗しました:", err);
+        console.error("動画復元失敗", err);
       }
     };
     restoreVideos();
+  }, []);
+
+  // ⑥ ObjectURL クリーンアップ安全版（アプリ終了時のみ安全に発動）
+  useEffect(() => {
+    return () => {
+      tabsRef.current.forEach((tab) => {
+        if (tab.videoSrc) {
+          URL.revokeObjectURL(tab.videoSrc);
+        }
+      });
+    };
   }, []);
 
   const updateActiveTab = (updates: Partial<VideoTab>) => {
@@ -278,26 +308,36 @@ export default function VideoAnalyzer() {
       zoom: 1,
       panX: 0,
       panY: 0,
+      videoId: undefined,
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(newId);
     setIsPlaying(false);
   };
 
+  // ⑧ closeTab ベスト版（メモリ解放＆videoId 削除対応）
   const closeTab = async (idToClose: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
+
+    const targetTab = tabs.find((t) => t.id === idToClose);
+    try {
+      if (targetTab?.videoId) {
+        await deleteVideoFromDB(targetTab.videoId);
+      }
+      if (targetTab?.videoSrc) {
+        URL.revokeObjectURL(targetTab.videoSrc);
+      }
+    } catch (err) {
+      console.error("タブ削除時の動画削除失敗", err);
+    }
+
     const filtered = tabs.filter((tab) => tab.id !== idToClose);
     setTabs(filtered);
     if (activeTabId === idToClose) {
       setActiveTabId(filtered[filtered.length - 1].id);
     }
     setIsPlaying(false);
-    try {
-      await deleteVideoFromDB(idToClose);
-    } catch (err) {
-      console.error(err);
-    }
   };
 
   const startRename = (tab: VideoTab, e: React.MouseEvent) => {
@@ -315,17 +355,28 @@ export default function VideoAnalyzer() {
     setEditingTabId(null);
   };
 
+  // ⑦ handleFileChange ベスト版（古いURL破棄 ＆ 新動画ID分離生成）
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      updateActiveTab({ videoSrc: url, name: file.name.substring(0, 10) });
-      setIsPlaying(false);
-      try {
-        await saveVideoToDB(activeTabId, file);
-      } catch (err) {
-        console.error(err);
+    if (!file) return;
+
+    try {
+      if (activeTab.videoSrc) {
+        URL.revokeObjectURL(activeTab.videoSrc);
       }
+
+      const videoId = `video-${Date.now()}`;
+      await saveVideoToDB(videoId, file);
+      const objectUrl = URL.createObjectURL(file);
+
+      updateActiveTab({
+        videoSrc: objectUrl,
+        videoId,
+        name: file.name.substring(0, 10),
+      });
+      setIsPlaying(false);
+    } catch (err) {
+      console.error("動画保存失敗", err);
     }
   };
 
@@ -356,7 +407,6 @@ export default function VideoAnalyzer() {
     }
   };
 
-  // 【A案】バックアップ書き出し機能
   const exportBackup = () => {
     const data = {
       categories,
@@ -371,7 +421,6 @@ export default function VideoAnalyzer() {
     URL.revokeObjectURL(url);
   };
 
-  // 【A案】バックアップ復元機能
   const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -382,10 +431,10 @@ export default function VideoAnalyzer() {
         if (data.categories && data.tabs) {
           setCategories(data.categories);
 
-          // 復元したタブに対してIndexedDB内に動画があれば即座に紐付け直す
           const tabsWithVideos = await Promise.all(
             data.tabs.map(async (tab: any) => {
-              const videoFile = await getVideoFromDB(tab.id);
+              if (!tab.videoId) return { ...tab, videoSrc: null };
+              const videoFile = await getVideoFromDB(tab.videoId);
               if (!videoFile) return { ...tab, videoSrc: null };
               return { ...tab, videoSrc: URL.createObjectURL(videoFile) };
             })
@@ -404,11 +453,11 @@ export default function VideoAnalyzer() {
     reader.readAsText(file);
   };
 
-  // 【新設】現在読み込んでいる動画ファイルをそのままデバイスにダウンロードする機能
+  // ⑨ downloadCurrentVideo 修正版 (activeTab.videoId から安全取得)
   const downloadCurrentVideo = async () => {
-    if (!activeTab.id || !activeTab.videoSrc) return;
+    if (!activeTab.videoId) return;
     try {
-      const file = await getVideoFromDB(activeTab.id);
+      const file = await getVideoFromDB(activeTab.videoId);
       if (file) {
         const url = URL.createObjectURL(file);
         const a = document.createElement("a");
@@ -417,7 +466,7 @@ export default function VideoAnalyzer() {
         a.click();
         URL.revokeObjectURL(url);
       } else {
-        alert("動画ファイルがブラウザに見つかりません。");
+        alert("動画ファイルが見つかりません");
       }
     } catch (err) {
       console.error("動画の保存に失敗しました:", err);
@@ -438,7 +487,7 @@ export default function VideoAnalyzer() {
         const secs = parseInt(match[2], 10);
         const totalSeconds = mins * 60 + secs;
         parts.push(
-          <button key={matchIndex} onClick={() => jumpToTime(totalSeconds)} className="text-amber-400 hover:text-amber-300 font-mono font-bold underline bg-amber-500/10 px-1 rounded mx-0.5 inline-block">
+          <button key={matchIndex} onClick={() => jumpToTime(totalSeconds)} className="text-cyan-400 hover:text-cyan-300 font-mono font-bold underline bg-cyan-500/10 px-1 rounded mx-0.5 inline-block">
             {match[0]}
           </button>
         );
@@ -464,16 +513,16 @@ export default function VideoAnalyzer() {
           <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
             <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs whitespace-nowrap">
               <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
-                <Folder size={12} className="text-amber-400" />
+                <Folder size={12} className="text-cyan-400" />
                 <span>フォルダ:</span>
               </div>
-              <button onClick={() => setCurrentCategory("すべて")} className={`px-3 py-1 rounded-lg font-medium transition-all ${currentCategory === "すべて" ? "bg-amber-500 text-black font-bold" : "text-zinc-400 hover:text-zinc-200"}`}>すべて</button>
+              <button onClick={() => setCurrentCategory("すべて")} className={`px-3 py-1 rounded-lg font-medium transition-all ${currentCategory === "すべて" ? "bg-cyan-500 text-black font-bold" : "text-zinc-400 hover:text-zinc-200"}`}>すべて</button>
               {categories.map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setCurrentCategory(cat)}
                   className={`px-3 py-1 rounded-lg font-medium transition-all ${
-                    currentCategory === cat ? "bg-amber-500 text-black font-bold shadow-md" : "text-zinc-400 hover:text-zinc-200"
+                    currentCategory === cat ? "bg-cyan-500 text-black font-bold shadow-md" : "text-zinc-400 hover:text-zinc-200"
                   }`}
                 >
                   {cat}
@@ -482,19 +531,16 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          {/* 右側アクション群（A案 バックアップ機能追加） */}
           <div className="flex items-center gap-1.5 self-end md:self-auto flex-wrap">
             <button
               onClick={exportBackup}
               className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all"
-              title="ノートや設定をファイルにエクスポート"
             >
               <Save size={12} className="text-emerald-400" />
               <span>データ保存</span>
             </button>
             <label
               className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
-              title="バックアップファイルを読み込んで復元"
             >
               <FolderOpen size={12} className="text-sky-400" />
               <span>データ復元</span>
@@ -576,7 +622,7 @@ export default function VideoAnalyzer() {
                         const newCat = e.target.value;
                         setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t)));
                       }}
-                      className="bg-zinc-950 text-amber-400 border border-zinc-800 rounded px-1 py-0.5 text-[10px] font-bold focus:outline-none"
+                      className="bg-zinc-950 text-cyan-400 border border-zinc-800 rounded px-1 py-0.5 text-[10px] font-bold focus:outline-none"
                     >
                       {categories.map((c) => (
                         <option key={c} value={c}>{c}</option>
@@ -585,7 +631,7 @@ export default function VideoAnalyzer() {
                   </div>
                 ) : (
                   <span className="flex items-center gap-1.5" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
-                    <span className="text-[9px] font-bold px-1 py-0.2 bg-zinc-950 rounded text-amber-400 border border-zinc-800/80 font-mono uppercase">{tab.category}</span>
+                    <span className="text-[9px] font-bold px-1 py-0.2 bg-zinc-950 rounded text-cyan-400 border border-zinc-800/80 font-mono uppercase">{tab.category}</span>
                     {tab.name}
                     <Edit2 size={10} className="opacity-40" />
                   </span>
@@ -605,12 +651,11 @@ export default function VideoAnalyzer() {
         <div className="flex flex-col lg:flex-row border-b border-zinc-800">
           <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
             
-            {/* ビデオプレイヤー外枠コンテナ */}
+            {/* ビデオプレイヤー外枠 */}
             <div className="relative aspect-video flex items-center justify-center p-2 overflow-hidden bg-[#050506]">
               {activeTab.videoSrc ? (
                 <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
                   
-                  {/* ズーム＆位置調整用レイヤー */}
                   <div 
                     className="w-full h-full flex items-center justify-center transition-all duration-150 ease-out" 
                     style={{ 
@@ -618,7 +663,6 @@ export default function VideoAnalyzer() {
                       transformOrigin: "center center"
                     }}
                   >
-                    {/* 回転用レイヤー */}
                     <div 
                       className="w-full h-full flex items-center justify-center" 
                       style={{ transform: `rotate(${activeTab.rotation}deg)` }}
@@ -653,7 +697,7 @@ export default function VideoAnalyzer() {
 
                   {/* ループ表示バッジ */}
                   {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
-                    <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-amber-400 z-20 flex items-center gap-1.5 border border-amber-500/30">
+                    <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-cyan-400 z-20 flex items-center gap-1.5 border border-cyan-500/30">
                       <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
                       <span>LOOP: {activeTab.loopStart !== null ? formatTime(activeTab.loopStart) : "--:--"} → {activeTab.loopEnd !== null ? formatTime(activeTab.loopEnd) : "--:--"}</span>
                     </div>
@@ -668,7 +712,7 @@ export default function VideoAnalyzer() {
             {activeTab.videoSrc && (
               <div className="p-3 md:p-4 bg-[#121215] space-y-4 border-t border-zinc-800/80">
                 
-                {/* 可視化ループ線付きカスタムシークバー */}
+                {/* カスタムシークバー */}
                 <div className="flex items-center gap-3">
                   <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
                   
@@ -677,7 +721,7 @@ export default function VideoAnalyzer() {
                     
                     {activeTab.loopStart !== null && activeTab.loopEnd !== null && duration > 0 && (
                       <div 
-                        className="absolute h-1 bg-amber-500/40 pointer-events-none"
+                        className="absolute h-1 bg-cyan-500/40 pointer-events-none"
                         style={{ 
                           left: `${(activeTab.loopStart / duration) * 100}%`,
                           width: `${((activeTab.loopEnd - activeTab.loopStart) / duration) * 100}%` 
@@ -686,11 +730,11 @@ export default function VideoAnalyzer() {
                     )}
                     
                     {activeTab.loopStart !== null && duration > 0 && (
-                      <div className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopStart / duration) * 100}%` }} />
+                      <div className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopStart / duration) * 100}%` }} />
                     )}
                     
                     {activeTab.loopEnd !== null && duration > 0 && (
-                      <div className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }} />
+                      <div className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }} />
                     )}
                     
                     <input 
@@ -707,7 +751,7 @@ export default function VideoAnalyzer() {
                   <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
                 </div>
 
-                {/* 操作系ボタン行 */}
+                {/* 操作系ボタン */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex items-center gap-1.5">
                     <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
@@ -716,40 +760,39 @@ export default function VideoAnalyzer() {
                   </div>
 
                   <div className="flex items-center bg-zinc-950 p-0.5 rounded-xl border border-zinc-800 text-[10px] font-bold">
-                    <button onClick={() => setLoopPoint("start")} className={`px-2 py-1 rounded-lg ${activeTab.loopStart !== null ? "bg-amber-500/20 text-amber-400" : "text-zinc-500 hover:text-zinc-300"}`}>[A点] 開始</button>
-                    <button onClick={() => setLoopPoint("end")} className={`px-2 py-1 rounded-lg ${activeTab.loopEnd !== null ? "bg-amber-500/20 text-amber-400" : "text-zinc-500 hover:text-zinc-300"}`}>[B点] 終了</button>
+                    <button onClick={() => setLoopPoint("start")} className={`px-2 py-1 rounded-lg ${activeTab.loopStart !== null ? "bg-cyan-500/20 text-cyan-400" : "text-zinc-500 hover:text-zinc-300"}`}>[A点] 開始</button>
+                    <button onClick={() => setLoopPoint("end")} className={`px-2 py-1 rounded-lg ${activeTab.loopEnd !== null ? "bg-cyan-500/20 text-cyan-400" : "text-zinc-500 hover:text-zinc-300"}`}>[B点] 終了</button>
                     {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
                       <button onClick={clearLoop} className="px-2 py-1 rounded-lg text-red-400 hover:bg-red-500/10">解除</button>
                     )}
                   </div>
 
-                  {/* 強化されたコントロール行（ズーム・動画保存ボタンの追加） */}
                   <div className="flex flex-wrap items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 text-[11px]">
                     <button onClick={() => updateActiveTab({ isMirrored: !activeTab.isMirrored })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.isMirrored ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><FlipHorizontal size={12} />ミラー</button>
-                    <button onClick={() => updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-amber-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
+                    <button onClick={() => updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-cyan-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
                     <button onClick={() => updateActiveTab({ showGrid: !activeTab.showGrid })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.showGrid ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><Grid size={12} />グリッド</button>
-                    <button onClick={() => setShowZoomPanel(!showZoomPanel)} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold ${showZoomPanel ? "bg-amber-500 text-black shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}><ZoomIn size={12} />ズーム</button>
-                    <button onClick={downloadCurrentVideo} className="px-2.5 py-1 rounded-lg flex items-center gap-1 text-zinc-400 hover:text-zinc-200" title="動画をカメラロールや本体に保存"><Download size={12} />保存</button>
+                    <button onClick={() => setShowZoomPanel(!showZoomPanel)} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold ${showZoomPanel ? "bg-cyan-500 text-black shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}><ZoomIn size={12} />ズーム</button>
+                    <button onClick={downloadCurrentVideo} className="px-2.5 py-1 rounded-lg flex items-center gap-1 text-zinc-400 hover:text-zinc-200"><Download size={12} />保存</button>
                   </div>
                 </div>
 
-                {/* 再生速度スライダー */}
+                {/* 再生速度 */}
                 <div className="flex items-center gap-3 pt-1">
                   <span className="text-[10px] font-bold text-zinc-500 tracking-wider whitespace-nowrap">SPEED: {activeTab.playbackRate.toFixed(2)}x</span>
-                  <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                  <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-cyan-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                 </div>
 
-                {/* 【隠せる開閉式に改良】画角ズーム ＋ 位置調整スライダー */}
+                {/* 開閉式ズーム調整パネル */}
                 {showZoomPanel && (
                   <div className="pt-3 border-t border-zinc-800/60 space-y-2 bg-black/40 p-2.5 rounded-xl border border-zinc-900 animate-fadeIn">
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold text-amber-400 tracking-wider flex items-center gap-1">
+                      <span className="text-[10px] font-bold text-cyan-400 tracking-wider flex items-center gap-1">
                         <ZoomIn size={12} /> 画角ズーム調整中: {activeTab.zoom.toFixed(1)}x
                       </span>
                       {(activeTab.zoom !== 1 || activeTab.panX !== 0 || activeTab.panY !== 0) && (
                         <button 
                           onClick={() => updateActiveTab({ zoom: 1, panX: 0, panY: 0 })}
-                          className="text-[9px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-amber-500/20"
+                          className="text-[9px] text-cyan-400 bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-cyan-500/20"
                         >
                           位置リセット
                         </button>
@@ -757,7 +800,6 @@ export default function VideoAnalyzer() {
                     </div>
                     
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      {/* 倍率 */}
                       <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
                         <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">拡大率</span>
                         <input 
@@ -767,11 +809,10 @@ export default function VideoAnalyzer() {
                           step={0.1} 
                           value={activeTab.zoom} 
                           onChange={(e) => updateActiveTab({ zoom: parseFloat(e.target.value) })} 
-                          className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" 
+                          className="flex-1 accent-cyan-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" 
                         />
                       </div>
 
-                      {/* 左右位置 */}
                       <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
                         <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">左右移動</span>
                         <input 
@@ -786,7 +827,6 @@ export default function VideoAnalyzer() {
                         />
                       </div>
 
-                      {/* 上下位置 */}
                       <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
                         <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">上下移動</span>
                         <input 
@@ -816,7 +856,7 @@ export default function VideoAnalyzer() {
                 <h2 className="text-xs font-bold tracking-wider uppercase">練習ノート</h2>
               </div>
               {activeTab.videoSrc && (
-                <button onClick={insertTimestamp} className="flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"><Clock size={12} /><span>タイムスタンプ挿入</span></button>
+                <button onClick={insertTimestamp} className="flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"><Clock size={12} /><span>タイムスタンプ挿入</span></button>
               )}
             </div>
             
