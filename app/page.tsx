@@ -27,17 +27,67 @@ interface VideoTab {
   notes: string;
 }
 
+const DB_NAME = "video-analyzer-db";
+const STORE_NAME = "videos";
+
+// IndexedDB のオープン
+const openDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+// 動画ファイルを保存
+const saveVideoToDB = async (id: string, file: File) => {
+  const db = await openDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(file, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+// 動画ファイルを取得
+const getVideoFromDB = async (id: string): Promise<File | null> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const request = tx.objectStore(STORE_NAME).get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+// 動画ファイルを削除
+const deleteVideoFromDB = async (id: string) => {
+  const db = await openDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
 export default function VideoAnalyzer() {
   // 保存データ読み込み
   const [tabs, setTabs] = useState<VideoTab[]>(() => {
     if (typeof window !== "undefined") {
       const savedTabs = localStorage.getItem("video-analyzer-tabs");
-
       if (savedTabs) {
         const parsedTabs: VideoTab[] = JSON.parse(savedTabs);
-
-        // リロード時はブラウザの仕様上 Blob URL が切れるため
-        // クラッシュ防止に videoSrc は一度安全に null に初期化する
+        // 初期化時は一律でvideoSrcをnullにして、IndexedDBからの自動復元を待つ
         return parsedTabs.map((tab) => ({
           ...tab,
           videoSrc: null,
@@ -62,11 +112,8 @@ export default function VideoAnalyzer() {
   // アクティブタブ保存
   const [activeTabId, setActiveTabId] = useState<string>(() => {
     if (typeof window !== "undefined") {
-      return (
-        localStorage.getItem("video-analyzer-active-tab") || "tab-1"
-      );
+      return localStorage.getItem("video-analyzer-active-tab") || "tab-1";
     }
-
     return "tab-1";
   });
 
@@ -79,59 +126,70 @@ export default function VideoAnalyzer() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const activeTab =
-    tabs.find((t) => t.id === activeTabId) || tabs[0];
+  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
-  // 自動保存
+  // ==========================================
+  // 🔥 【統合】アプリ起動時に全タブの動画を一括復元するロジック
+  // ==========================================
   useEffect(() => {
-    // ローカルデータの有効期限が切れる videoSrc 以外（ノートやUI情報）を確実に永続化
+    const restoreVideos = async () => {
+      try {
+        const updatedTabs = await Promise.all(
+          tabs.map(async (tab) => {
+            // 既存の識別子である tab.id を使用して IndexedDB から動画を取得
+            const file = await getVideoFromDB(tab.id);
+            if (!file) return tab;
+
+            return {
+              ...tab,
+              videoSrc: URL.createObjectURL(file),
+            };
+          })
+        );
+        setTabs(updatedTabs);
+      } catch (err) {
+        console.error("動画の一括復元に失敗しました:", err);
+      }
+    };
+
+    restoreVideos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 初回マウント時のみ実行
+
+  // 自動保存（localStorageにはUI状態とノートだけを安全に保存）
+  useEffect(() => {
     const safeTabs = tabs.map((tab) => ({
       ...tab,
       videoSrc: null,
     }));
-
-    localStorage.setItem(
-      "video-analyzer-tabs",
-      JSON.stringify(safeTabs)
-    );
+    localStorage.setItem("video-analyzer-tabs", JSON.stringify(safeTabs));
   }, [tabs]);
 
   useEffect(() => {
-    localStorage.setItem(
-      "video-analyzer-active-tab",
-      activeTabId
-    );
+    localStorage.setItem("video-analyzer-active-tab", activeTabId);
   }, [activeTabId]);
 
-  const updateActiveTab = (
-    updates: Partial<VideoTab>
-  ) => {
+  const updateActiveTab = (updates: Partial<VideoTab>) => {
     setTabs((prev) =>
-      prev.map((tab) =>
-        tab.id === activeTabId
-          ? { ...tab, ...updates }
-          : tab
-      )
+      prev.map((tab) => (tab.id === activeTabId ? { ...tab, ...updates } : tab))
     );
   };
 
-  // タブ切り替え時
+  // タブ切り替え時のリセット
+  useEffect(() => {
+    setIsPlaying(false);
+  }, [activeTabId]);
+
+  // ビデオ要素の再生速度同期
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.playbackRate =
-        activeTab.playbackRate;
-
-      setCurrentTime(
-        videoRef.current.currentTime || 0
-      );
+      videoRef.current.playbackRate = activeTab.playbackRate;
+      setCurrentTime(videoRef.current.currentTime || 0);
     }
-
-    setIsPlaying(false);
-  }, [activeTabId, activeTab.playbackRate]);
+  }, [activeTabId, activeTab.playbackRate, activeTab.videoSrc]);
 
   const addNewTab = () => {
     const newId = `tab-${Date.now()}`;
-
     const newTab: VideoTab = {
       id: newId,
       name: `セッション ${tabs.length + 1}`,
@@ -142,39 +200,33 @@ export default function VideoAnalyzer() {
       playbackRate: 1,
       notes: "",
     };
-
     setTabs([...tabs, newTab]);
     setActiveTabId(newId);
     setIsPlaying(false);
   };
 
-  const closeTab = (
-    idToClose: string,
-    e: React.MouseEvent
-  ) => {
+  // タブを閉じる際、IndexedDB の中の該当動画も一緒に削除する
+  const closeTab = async (idToClose: string, e: React.MouseEvent) => {
     e.stopPropagation();
-
     if (tabs.length === 1) return;
 
-    const filtered = tabs.filter(
-      (tab) => tab.id !== idToClose
-    );
-
+    const filtered = tabs.filter((tab) => tab.id !== idToClose);
     setTabs(filtered);
 
     if (activeTabId === idToClose) {
-      setActiveTabId(
-        filtered[filtered.length - 1].id
-      );
+      setActiveTabId(filtered[filtered.length - 1].id);
     }
-
     setIsPlaying(false);
+
+    // バックグラウンドでIndexedDBから動画を削除
+    try {
+      await deleteVideoFromDB(idToClose);
+    } catch (err) {
+      console.error("IndexedDBからの動画削除に失敗しました:", err);
+    }
   };
 
-  const startRename = (
-    tab: VideoTab,
-    e: React.MouseEvent
-  ) => {
+  const startRename = (tab: VideoTab, e: React.MouseEvent) => {
     e.stopPropagation();
     setEditingTabId(tab.id);
     setEditName(tab.name);
@@ -183,169 +235,123 @@ export default function VideoAnalyzer() {
   const saveRename = () => {
     if (editName.trim()) {
       setTabs((prev) =>
-        prev.map((t) =>
-          t.id === editingTabId
-            ? { ...t, name: editName }
-            : t
-        )
+        prev.map((t) => (t.id === editingTabId ? { ...t, name: editName } : t))
       );
     }
-
     setEditingTabId(null);
   };
 
-  const handleFileChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  // ファイル選択時、状態の更新だけでなく IndexedDB にも非同期でファイルを保存する
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-
     if (file) {
       const url = URL.createObjectURL(file);
-
+      
       updateActiveTab({
         videoSrc: url,
         name: file.name.substring(0, 10),
       });
-
       setIsPlaying(false);
+
+      // IndexedDBに動画ファイル本体を保存
+      try {
+        await saveVideoToDB(activeTabId, file);
+      } catch (err) {
+        console.error("IndexedDBへの動画保存に失敗しました:", err);
+      }
     }
   };
 
   const togglePlay = () => {
     if (!videoRef.current) return;
-
     if (isPlaying) {
       videoRef.current.pause();
     } else {
       videoRef.current.play();
     }
-
     setIsPlaying(!isPlaying);
   };
 
-  const handleRateSliderChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleRateSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const rate = parseFloat(e.target.value);
-
     if (videoRef.current) {
       videoRef.current.playbackRate = rate;
     }
-
-    updateActiveTab({
-      playbackRate: rate,
-    });
+    updateActiveTab({ playbackRate: rate });
   };
 
   const toggleRotation = () => {
-    updateActiveTab({
-      rotation: (activeTab.rotation + 90) % 360,
-    });
+    updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 });
   };
 
-  const stepFrame = (
-    direction: "forward" | "backward"
-  ) => {
+  const stepFrame = (direction: "forward" | "backward") => {
     if (!videoRef.current) return;
-
     videoRef.current.pause();
     setIsPlaying(false);
-
-    videoRef.current.currentTime +=
-      direction === "forward"
-        ? 1 / 30
-        : -1 / 30;
+    videoRef.current.currentTime += direction === "forward" ? 1 / 30 : -1 / 30;
   };
 
-  const handleSeek = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!videoRef.current) return;
-
     const time = parseFloat(e.target.value);
-
     videoRef.current.currentTime = time;
     setCurrentTime(time);
   };
 
   const jumpToTime = (seconds: number) => {
     if (!videoRef.current) return;
-
     videoRef.current.currentTime = seconds;
     setCurrentTime(seconds);
-
     if (!isPlaying) {
       videoRef.current.play();
       setIsPlaying(true);
     }
   };
 
-  const renderNotesWithTimestamps = (
-    text: string
-  ) => {
+  const renderNotesWithTimestamps = (text: string) => {
     if (!text) {
       return (
         <span className="text-zinc-600 text-xs">
-          ここにメモを入力すると、
-          タイムスタンプが自動生成されます。
+          ここにメモを入力すると、タイムスタンプが自動生成されます。
         </span>
       );
     }
 
     const lines = text.split("\n");
-
     return lines.map((line, i) => {
-      const timestampRegex =
-        /(\d{1,2}):(\d{2})/g;
-
+      const timestampRegex = /(\d{1,2}):(\d{2})/g;
       const parts = [];
-
       let lastIndex = 0;
       let match;
 
-      while (
-        (match = timestampRegex.exec(line)) !==
-        null
-      ) {
+      while ((match = timestampRegex.exec(line)) !== null) {
         const matchIndex = match.index;
-
         if (matchIndex > lastIndex) {
-          parts.push(
-            line.substring(lastIndex, matchIndex)
-          );
+          parts.push(line.substring(lastIndex, matchIndex));
         }
 
         const mins = parseInt(match[1], 10);
         const secs = parseInt(match[2], 10);
-
         const totalSeconds = mins * 60 + secs;
 
         parts.push(
           <button
             key={matchIndex}
-            onClick={() =>
-              jumpToTime(totalSeconds)
-            }
+            onClick={() => jumpToTime(totalSeconds)}
             className="text-amber-400 hover:text-amber-300 font-mono font-bold underline bg-amber-500/10 px-1 rounded transition-colors inline-block my-0.5 mx-0.5"
           >
             {match[0]}
           </button>
         );
-
         lastIndex = timestampRegex.lastIndex;
       }
 
       if (lastIndex < line.length) {
-        parts.push(
-          line.substring(lastIndex)
-        );
+        parts.push(line.substring(lastIndex));
       }
 
       return (
-        <div
-          key={i}
-          className="min-h-[1.5rem] break-all"
-        >
+        <div key={i} className="min-h-[1.5rem] break-all">
           {parts.length > 0 ? parts : line}
         </div>
       );
@@ -354,12 +360,8 @@ export default function VideoAnalyzer() {
 
   const formatTime = (time: number) => {
     const mins = Math.floor(time / 60);
-
     const secs = Math.floor(time % 60);
-
-    return `${mins}:${secs
-      .toString()
-      .padStart(2, "0")}`;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
   return (
@@ -372,7 +374,7 @@ export default function VideoAnalyzer() {
             {tabs.map((tab) => (
               <div
                 key={tab.id}
-                onClick={() => { setActiveTabId(tab.id); setIsPlaying(false); }}
+                onClick={() => { setActiveTabId(tab.id); }}
                 className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border ${
                   tab.id === activeTabId
                     ? "bg-zinc-800 text-white border-zinc-700 shadow-sm"
@@ -421,8 +423,7 @@ export default function VideoAnalyzer() {
                     src={activeTab.videoSrc || ""}
                     playsInline
                     onError={() => {
-                      console.log("動画の有効期限切れを検知しました");
-                      updateActiveTab({ videoSrc: null });
+                      console.log("動画のロード中、または有効期限切れを検知しました");
                     }}
                     className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
                     onPlay={() => setIsPlaying(true)}
