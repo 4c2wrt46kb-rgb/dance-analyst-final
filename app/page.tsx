@@ -966,12 +966,13 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          {/* 📂 【バグ修正対象】フォルダ管理パネル */}
+          {/* 📂 フォルダ管理パネル */}
           {isManagingCats && (
             <div className="bg-[#0b0b0f] border-b border-zinc-850 p-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <input type="text" placeholder="新しいフォルダ名" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCategory()} className="bg-zinc-900 text-xs text-white border border-zinc-800 rounded-xl px-3 py-1.5 focus:outline-none" />
-                <button onClick={addCategory} className="bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} fill="currentColor" />追加</button>
+                {/* 🎨 背景色をシアンのすりガラス風に統一 */}
+                <button onClick={addCategory} className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20 text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} className="stroke-[2.5]" />追加</button>
               </div>
               <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-850/40">
                 {categories.map((cat) => (
@@ -981,24 +982,20 @@ export default function VideoAnalyzer() {
                       defaultValue={cat} 
                       onBlur={(e) => {
                         const newName = e.target.value.trim();
-                        // 空文字、または何も変わっていない場合は無視して元の値に戻す
                         if (!newName || newName === cat) {
                           e.target.value = cat;
                           return;
                         }
-                        // すでに存在する名前への重複チェック
                         if (categories.includes(newName)) {
                           alert("そのフォルダ名は既に存在します");
                           e.target.value = cat;
                           return;
                         }
-                        // 確定したタイミングで一括更新
                         setCategories(categories.map((c) => (c === cat ? newName : c)));
                         setTabs(tabs.map((t) => (t.category === cat ? { ...t, category: newName } : t)));
                         if (currentCategory === cat) setCurrentCategory(newName);
                       }}
                       onKeyDown={(e) => {
-                        // Enterキーが押されたら強制的にフォーカスアウトさせて確定させる
                         if (e.key === "Enter") e.currentTarget.blur();
                       }}
                       className="bg-transparent font-medium focus:outline-none w-20 md:w-24 text-zinc-200 border-b border-transparent focus:border-cyan-500/50 transition-all" 
@@ -1049,18 +1046,44 @@ export default function VideoAnalyzer() {
                       </button>
                     </div>
                   ) : (
-                    <span className="flex items-center gap-1.5" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
-                      <span className="text-[9px] font-bold px-1 py-0.2 bg-zinc-950 rounded text-cyan-400 border border-zinc-800/80 font-mono uppercase">{tab.category}</span>
-                      {tab.name}
-                      <Edit2 size={10} className="opacity-40" />
-                    </span>
+                    /* 🛠️ フォルダ変更をバッジクリックで直接行えるようにプルダウン化 */
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={tab.category}
+                        onChange={(e) => {
+                          const newCat = e.target.value;
+                          setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t)));
+                        }}
+                        onClick={(e) => e.stopPropagation()} // タブ切り替えが動かないようにブロック
+                        className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-950 rounded text-cyan-400 border border-zinc-800/80 font-mono uppercase focus:outline-none cursor-pointer appearance-none text-center hover:border-cyan-500/40 transition-all"
+                      >
+                        {categories.map((c) => (
+                          <option key={c} value={c} className="bg-[#121218] text-zinc-300">
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                      <span 
+                        className="flex items-center gap-1"
+                        onClick={(e) => {
+                          if (tab.id === activeTabId) {
+                            e.stopPropagation();
+                            startRename(tab, e);
+                          }
+                        }}
+                      >
+                        {tab.name}
+                        <Edit2 size={10} className="opacity-40" />
+                      </span>
+                    </div>
                   )}
                   {tabs.length > 1 && <X size={12} className="hover:bg-zinc-700 p-0.5 rounded-full" onClick={(e) => closeTab(tab.id, e)} />}
                 </div>
               ))}
               <button onClick={() => addNewTab()} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 shrink-0"><Plus size={12} /></button>
             </div>
-            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap"><Upload size={12} />動画読込</button>
+            {/* 🎨 背景の「白いやつ」をシックなダークグレー＋境界線に変更しデータ系ボタンと統一 */}
+            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-700 text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap transition-all"><Upload size={12} />動画読込</button>
             <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="video/*" className="hidden" />
           </div>
 
@@ -1168,7 +1191,8 @@ export default function VideoAnalyzer() {
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-1.5">
                       <button onClick={() => stepFrame("backward", 1)} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
-                      <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white text-black font-bold shadow-md">{isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}</button>
+                      {/* 🎨 再生ボタンを白背景から、テーマカラーのネオンシアンに統一 */}
+                      <button onClick={togglePlay} className="p-2.5 rounded-lg bg-cyan-500 text-black font-bold shadow-md shadow-cyan-500/10 hover:bg-cyan-400 transition-all">{isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}</button>
                       <button onClick={() => stepFrame("forward", 1)} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsRight size={14} /></button>
                     </div>
 
@@ -1213,7 +1237,7 @@ export default function VideoAnalyzer() {
                 <div className="flex items-center gap-2 text-zinc-400"><FileText size={14} /><h2 className="text-xs font-bold tracking-wider uppercase">練習ノート</h2></div>
                 {activeTab.videoSrc && <button onClick={insertTimestamp} className="flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"><Clock size={12} /><span>タイムスタンプ挿入</span></button>}
               </div>
-              <textarea value={activeTab.notes} onChange={(e) => updateActiveTab({ notes: e.target.value })} placeholder="例:&#10;1:02 ここの足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！" className="w-full h-24 lg:h-32 bg-[#0b0b0f] border border-zinc-850 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none font-sans leading-relaxed" />
+              <textarea value={activeTab.notes} onChange={(e) => updateActiveTab({ notes: e.target.value })} placeholder="例:&#10;1:02 ここ足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！" className="w-full h-24 lg:h-32 bg-[#0b0b0f] border border-zinc-850 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none font-sans leading-relaxed" />
               <div className="flex-1 bg-[#0b0b0f]/50 border border-zinc-850 rounded-xl p-3 overflow-y-auto text-xs text-zinc-300 font-sans leading-loose max-h-[200px] lg:max-h-none">
                 {renderNotesWithTimestamps(activeTab.notes)}
               </div>
