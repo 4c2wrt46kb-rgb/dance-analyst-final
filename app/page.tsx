@@ -18,6 +18,7 @@ import {
   Settings2,
   RefreshCw,
   Plus,
+  ZoomIn,
 } from "lucide-react";
 
 interface VideoTab {
@@ -32,6 +33,9 @@ interface VideoTab {
   category: string;
   loopStart: number | null;
   loopEnd: number | null;
+  zoom: number;
+  panX: number;
+  panY: number;
 }
 
 const DB_NAME = "video-analyzer-db";
@@ -101,6 +105,9 @@ export default function VideoAnalyzer() {
           category: tab.category || "その他",
           loopStart: tab.loopStart !== undefined ? tab.loopStart : null,
           loopEnd: tab.loopEnd !== undefined ? tab.loopEnd : null,
+          zoom: tab.zoom !== undefined ? tab.zoom : 1,
+          panX: tab.panX !== undefined ? tab.panX : 0,
+          panY: tab.panY !== undefined ? tab.panY : 0,
         }));
       }
     }
@@ -117,6 +124,9 @@ export default function VideoAnalyzer() {
         category: "その他",
         loopStart: null,
         loopEnd: null,
+        zoom: 1,
+        panX: 0,
+        panY: 0,
       },
     ];
   });
@@ -261,6 +271,9 @@ export default function VideoAnalyzer() {
       category: currentCategory === "すべて" ? (categories[0] || "その他") : currentCategory,
       loopStart: null,
       loopEnd: null,
+      zoom: 1,
+      panX: 0,
+      panY: 0,
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(newId);
@@ -502,34 +515,54 @@ export default function VideoAnalyzer() {
         {/* メインコンテンツ */}
         <div className="flex flex-col lg:flex-row border-b border-zinc-800">
           <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
+            
+            {/* ビデオプレイヤー外枠コンテナ（はみ出し防止） */}
             <div className="relative aspect-video flex items-center justify-center p-2 overflow-hidden bg-[#050506]">
               {activeTab.videoSrc ? (
-                <div className="w-full h-full flex items-center justify-center transition-transform duration-300" style={{ transform: `rotate(${activeTab.rotation}deg)` }}>
-                  <video
-                    ref={videoRef}
-                    key={activeTab.id}
-                    src={activeTab.videoSrc || ""}
-                    playsInline
-                    className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onTimeUpdate={handleTimeUpdate}
-                    onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)}
-                    onClick={togglePlay}
-                  />
-                  {activeTab.showGrid && (
-                    <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
-                      <div className="border-r border-b border-dashed border-white/50"></div>
-                      <div className="border-r border-b border-dashed border-white/50"></div>
-                      <div className="border-b border-dashed border-white/50"></div>
-                      <div className="border-r border-b border-dashed border-white/50"></div>
-                      <div className="border-r border-b border-dashed border-white/50"></div>
-                      <div className="border-b border-dashed border-white/50"></div>
-                      <div className="border-r border-dashed border-white/50"></div>
-                      <div className="border-r border-dashed border-white/50"></div>
-                      <div></div>
+                <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
+                  
+                  {/* ズーム＆位置調整用レイヤー */}
+                  <div 
+                    className="w-full h-full flex items-center justify-center transition-all duration-150 ease-out" 
+                    style={{ 
+                      transform: `translate(${activeTab.panX}px, ${activeTab.panY}px) scale(${activeTab.zoom})`,
+                      transformOrigin: "center center"
+                    }}
+                  >
+                    {/* 回転用レイヤー */}
+                    <div 
+                      className="w-full h-full flex items-center justify-center" 
+                      style={{ transform: `rotate(${activeTab.rotation}deg)` }}
+                    >
+                      <video
+                        ref={videoRef}
+                        key={activeTab.id}
+                        src={activeTab.videoSrc || ""}
+                        playsInline
+                        className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`}
+                        onPlay={() => setIsPlaying(true)}
+                        onPause={() => setIsPlaying(false)}
+                        onTimeUpdate={handleTimeUpdate}
+                        onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)}
+                        onClick={togglePlay}
+                      />
+                      {activeTab.showGrid && (
+                        <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
+                          <div className="border-r border-b border-dashed border-white/50"></div>
+                          <div className="border-r border-b border-dashed border-white/50"></div>
+                          <div className="border-b border-dashed border-white/50"></div>
+                          <div className="border-r border-b border-dashed border-white/50"></div>
+                          <div className="border-r border-b border-dashed border-white/50"></div>
+                          <div className="border-b border-dashed border-white/50"></div>
+                          <div className="border-r border-dashed border-white/50"></div>
+                          <div className="border-r border-dashed border-white/50"></div>
+                          <div></div>
+                        </div>
+                      )}
                     </div>
-                  )}
+                  </div>
+
+                  {/* ループ表示バッジ（画面固定） */}
                   {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
                     <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-amber-400 z-20 flex items-center gap-1.5 border border-amber-500/30">
                       <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
@@ -544,13 +577,59 @@ export default function VideoAnalyzer() {
 
             {/* コントローラー */}
             {activeTab.videoSrc && (
-              <div className="p-3 md:p-4 bg-[#121215] space-y-3 border-t border-zinc-800/80">
+              <div className="p-3 md:p-4 bg-[#121215] space-y-4 border-t border-zinc-800/80">
+                
+                {/* 可視化ループ線付きカスタムシークバー */}
                 <div className="flex items-center gap-3">
                   <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
-                  <input type="range" min={0} max={duration || 100} step={0.01} value={currentTime} onChange={(e) => { if (videoRef.current) videoRef.current.currentTime = parseFloat(e.target.value); }} className="flex-1 accent-white bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
+                  
+                  <div className="relative flex-1 h-6 flex items-center">
+                    {/* ベースの背景レール */}
+                    <div className="absolute left-0 right-0 h-1 bg-zinc-800 rounded-lg pointer-events-none"></div>
+                    
+                    {/* A-B点間の範囲ハイライト */}
+                    {activeTab.loopStart !== null && activeTab.loopEnd !== null && duration > 0 && (
+                      <div 
+                        className="absolute h-1 bg-amber-500/40 pointer-events-none"
+                        style={{ 
+                          left: `${(activeTab.loopStart / duration) * 100}%`,
+                          width: `${((activeTab.loopEnd - activeTab.loopStart) / duration) * 100}%` 
+                        }}
+                      />
+                    )}
+                    
+                    {/* A点（開始）の縦線マーカー */}
+                    {activeTab.loopStart !== null && duration > 0 && (
+                      <div 
+                        className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10"
+                        style={{ left: `${(activeTab.loopStart / duration) * 100}%` }}
+                      />
+                    )}
+                    
+                    {/* B点（終了）の縦線マーカー */}
+                    {activeTab.loopEnd !== null && duration > 0 && (
+                      <div 
+                        className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10"
+                        style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }}
+                      />
+                    )}
+                    
+                    {/* 透明な本物の操作スライダーを重ねる */}
+                    <input 
+                      type="range" 
+                      min={0} 
+                      max={duration || 100} 
+                      step={0.01} 
+                      value={currentTime} 
+                      onChange={(e) => { if (videoRef.current) videoRef.current.currentTime = parseFloat(e.target.value); }} 
+                      className="w-full accent-white bg-transparent h-6 appearance-none cursor-pointer relative z-20 focus:outline-none" 
+                    />
+                  </div>
+
                   <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
                 </div>
 
+                {/* 操作系ボタン行 */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex items-center gap-1.5">
                     <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
@@ -573,10 +652,75 @@ export default function VideoAnalyzer() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 pt-1 border-t border-zinc-800/40">
+                {/* 再生速度スライダー */}
+                <div className="flex items-center gap-3 pt-1">
                   <span className="text-[10px] font-bold text-zinc-500 tracking-wider whitespace-nowrap">SPEED: {activeTab.playbackRate.toFixed(2)}x</span>
                   <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                 </div>
+
+                {/* 【新設】画角ズーム ＋ 位置調整スライダー（切り取り機能の代わり） */}
+                <div className="pt-3 border-t border-zinc-800/40 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-zinc-500 tracking-wider flex items-center gap-1">
+                      <ZoomIn size={12} /> 画角ズーム: {activeTab.zoom.toFixed(1)}x
+                    </span>
+                    {(activeTab.zoom !== 1 || activeTab.panX !== 0 || activeTab.panY !== 0) && (
+                      <button 
+                        onClick={() => updateActiveTab({ zoom: 1, panX: 0, panY: 0 })}
+                        className="text-[9px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-amber-500/20"
+                      >
+                        ズーム・位置リセット
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {/* 倍率 */}
+                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
+                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">拡大率</span>
+                      <input 
+                        type="range" 
+                        min={1.0} 
+                        max={3.0} 
+                        step={0.1} 
+                        value={activeTab.zoom} 
+                        onChange={(e) => updateActiveTab({ zoom: parseFloat(e.target.value) })} 
+                        className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" 
+                      />
+                    </div>
+
+                    {/* 左右位置 */}
+                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
+                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">左右移動</span>
+                      <input 
+                        type="range" 
+                        min={-300} 
+                        max={300} 
+                        step={1} 
+                        value={activeTab.panX} 
+                        disabled={activeTab.zoom === 1}
+                        onChange={(e) => updateActiveTab({ panX: parseInt(e.target.value) })} 
+                        className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
+                      />
+                    </div>
+
+                    {/* 上下位置 */}
+                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
+                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">上下移動</span>
+                      <input 
+                        type="range" 
+                        min={-300} 
+                        max={300} 
+                        step={1} 
+                        value={activeTab.panY} 
+                        disabled={activeTab.zoom === 1}
+                        onChange={(e) => updateActiveTab({ panY: parseInt(e.target.value) })} 
+                        className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
+                      />
+                    </div>
+                  </div>
+                </div>
+
               </div>
             )}
           </div>
