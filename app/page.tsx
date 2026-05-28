@@ -32,10 +32,10 @@ import {
   Square,
   Trash2,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  Check
 } from "lucide-react";
 
-// 🌳 目標ツリー用の型定義
 interface GoalNode {
   id: string;
   text: string;
@@ -113,11 +113,106 @@ const deleteVideoFromDB = async (id: string) => {
   });
 };
 
+// ✨ 【バグ修正の肝】キーボードが消えないようにコンポーネントを外へ追い出しました
+interface RenderGoalNodeProps {
+  node: GoalNode;
+  depth: number;
+  onToggleExpand: (id: string) => void;
+  onToggleComplete: (id: string) => void;
+  onUpdateText: (id: string, text: string) => void;
+  onAddChild: (parentId: string) => void;
+  onDelete: (id: string) => void;
+}
+
+const RenderGoalNode = ({ 
+  node, 
+  depth = 0, 
+  onToggleExpand, 
+  onToggleComplete, 
+  onUpdateText, 
+  onAddChild, 
+  onDelete 
+}: RenderGoalNodeProps) => {
+  const isRoot = node.id === "root";
+  return (
+    <div className="flex flex-col mt-2 select-none w-full">
+      <div 
+        className={`flex items-center gap-2 group p-2 rounded-xl border transition-all ${
+          isRoot 
+            ? "bg-[#191924] border-cyan-500/30 shadow-md shadow-cyan-500/5 py-3" 
+            : "bg-[#121218]/80 border-zinc-800/60 hover:bg-[#191924]"
+        }`}
+        style={{ marginLeft: `${depth * 14}px` }}
+      >
+        {node.children.length > 0 ? (
+          <button onClick={() => onToggleExpand(node.id)} className="text-zinc-500 hover:text-zinc-300 transition-colors p-0.5">
+            {node.isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        ) : (
+          <div className="w-4" />
+        )}
+
+        <button onClick={() => onToggleComplete(node.id)} className="text-zinc-400 hover:text-cyan-400 transition-colors">
+          {node.completed ? (
+            <CheckSquare size={15} className="text-cyan-400 stroke-[2.5]" />
+          ) : (
+            <Square size={15} className="text-zinc-600 group-hover:text-zinc-400" />
+          )}
+        </button>
+
+        <input
+          type="text"
+          value={node.text}
+          onChange={(e) => onUpdateText(node.id, e.target.value)}
+          placeholder="目標を入力..."
+          className={`bg-transparent focus:outline-none flex-1 min-w-0 text-xs md:text-sm transition-all ${
+            node.completed ? "text-zinc-600 line-through italic" : "text-zinc-200"
+          } ${isRoot ? "font-black text-sm md:text-base text-white" : depth === 1 ? "font-bold text-cyan-300" : "font-medium"}`}
+        />
+
+        <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity shrink-0">
+          <button 
+            onClick={() => onAddChild(node.id)}
+            title="新しい枝（子目標）を追加"
+            className="p-1 text-zinc-400 hover:text-cyan-400 bg-zinc-950/60 border border-zinc-800 rounded-lg hover:border-zinc-700"
+          >
+            <Plus size={12} className="stroke-[2.5]" />
+          </button>
+          {!isRoot && (
+            <button 
+              onClick={() => onDelete(node.id)}
+              title="この枝を削除"
+              className="p-1 text-zinc-500 hover:text-red-400 bg-zinc-950/60 border border-zinc-800 rounded-lg hover:border-zinc-700"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {node.isExpanded && node.children.length > 0 && (
+        <div className="relative border-l border-zinc-800/80 ml-[23px] pl-1.5 transition-all">
+          {node.children.map(child => (
+            <RenderGoalNode 
+              key={child.id} 
+              node={child} 
+              depth={depth + 1} 
+              onToggleExpand={onToggleExpand}
+              onToggleComplete={onToggleComplete}
+              onUpdateText={onUpdateText}
+              onAddChild={onAddChild}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function VideoAnalyzer() {
-  // 🗺️ 画面切り替えステート ('home' | 'analyzer' | 'goals')
   const [view, setView] = useState<"home" | "analyzer" | "goals">("home");
 
-  // 🌳 目標ツリーの初期データ（ローカルストレージから読み込み）
   const [goalRoot, setGoalRoot] = useState<GoalNode>(() => {
     if (typeof window !== "undefined") {
       const savedGoals = localStorage.getItem("video-analyzer-goals");
@@ -198,8 +293,11 @@ export default function VideoAnalyzer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [editCategory, setEditCategory] = useState("");
+
   const [isManagingCats, setIsManagingCats] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [showZoomPanel, setShowZoomPanel] = useState(false);
@@ -230,7 +328,6 @@ export default function VideoAnalyzer() {
     localStorage.setItem("video-analyzer-active-tab", activeTabId);
   }, [activeTabId]);
 
-  // 🌳 目標ツリーデータの自動保存
   useEffect(() => {
     localStorage.setItem("video-analyzer-goals", JSON.stringify(goalRoot));
   }, [goalRoot]);
@@ -262,7 +359,6 @@ export default function VideoAnalyzer() {
     };
   }, []);
 
-  // 🌳 目標ツリー操作用ヘルパー関数群（再帰処理）
   const updateTreeRecursively = (node: GoalNode, targetId: string, updater: (n: GoalNode) => Partial<GoalNode>): GoalNode => {
     if (node.id === targetId) {
       return { ...node, ...updater(node) };
@@ -308,7 +404,6 @@ export default function VideoAnalyzer() {
     if (id === "root") return;
     setGoalRoot(prev => deleteNodeRecursively(prev, id));
   };
-
 
   const updateActiveTab = (updates: Partial<VideoTab>) => {
     setTabs((prev) =>
@@ -426,11 +521,18 @@ export default function VideoAnalyzer() {
     e.stopPropagation();
     setEditingTabId(tab.id);
     setEditName(tab.name);
+    setEditCategory(tab.category || "その他");
   };
 
   const saveRename = () => {
     if (editName.trim()) {
-      setTabs((prev) => prev.map((t) => (t.id === editingTabId ? { ...t, name: editName } : t)));
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === editingTabId
+            ? { ...t, name: editName, category: editCategory }
+            : t
+        )
+      );
     }
     setEditingTabId(null);
   };
@@ -600,86 +702,11 @@ export default function VideoAnalyzer() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // 🌳 目標ノードを再帰的にレンダリングするコンポーネント関数
-  const RenderGoalNode = ({ node, depth = 0 }: { node: GoalNode; depth: number }) => {
-    const isRoot = node.id === "root";
-    return (
-      <div className="flex flex-col mt-2 select-none w-full">
-        <div 
-          className={`flex items-center gap-2 group p-2 rounded-xl border transition-all ${
-            isRoot 
-              ? "bg-gradient-to-r from-[#1e1e2f] to-[#15151f] border-cyan-500/30 shadow-md shadow-cyan-500/5 py-3" 
-              : "bg-zinc-900/40 border-zinc-800/60 hover:bg-zinc-900/80"
-          }`}
-          style={{ marginLeft: `${depth * 14}px` }}
-        >
-          {/* 折りたたみボタン */}
-          {node.children.length > 0 ? (
-            <button onClick={() => handleToggleGoalExpand(node.id)} className="text-zinc-500 hover:text-zinc-300 transition-colors p-0.5">
-              {node.isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            </button>
-          ) : (
-            <div className="w-4" />
-          )}
-
-          {/* 完了チェックボックス */}
-          <button onClick={() => handleToggleGoalComplete(node.id)} className="text-zinc-400 hover:text-cyan-400 transition-colors">
-            {node.completed ? (
-              <CheckSquare size={15} className="text-cyan-400 stroke-[2.5]" />
-            ) : (
-              <Square size={15} className="text-zinc-600 group-hover:text-zinc-400" />
-            )}
-          </button>
-
-          {/* テキスト入力エリア */}
-          <input
-            type="text"
-            value={node.text}
-            onChange={(e) => handleUpdateGoalText(node.id, e.target.value)}
-            placeholder="目標を入力..."
-            className={`bg-transparent focus:outline-none flex-1 min-w-0 text-xs md:text-sm transition-all ${
-              node.completed ? "text-zinc-600 line-through italic" : "text-zinc-200"
-            } ${isRoot ? "font-black text-sm md:text-base text-white" : depth === 1 ? "font-bold text-cyan-300" : "font-medium"}`}
-          />
-
-          {/* アクションボタン（マウスホバーで表示） */}
-          <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity shrink-0">
-            <button 
-              onClick={() => handleAddChildGoal(node.id)}
-              title="新しい枝（子目標）を追加"
-              className="p-1 text-zinc-400 hover:text-cyan-400 bg-zinc-950/60 border border-zinc-800 rounded-lg hover:border-zinc-700"
-            >
-              <Plus size={12} className="stroke-[2.5]" />
-            </button>
-            {!isRoot && (
-              <button 
-                onClick={() => handleDeleteGoal(node.id)}
-                title="この枝を削除"
-                className="p-1 text-zinc-500 hover:text-red-400 bg-zinc-950/60 border border-zinc-800 rounded-lg hover:border-zinc-700"
-              >
-                <Trash2 size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* 子要素の再帰描画 */}
-        {node.isExpanded && node.children.length > 0 && (
-          <div className="relative border-l border-zinc-800/80 ml-[23px] pl-1.5 transition-all">
-            {node.children.map(child => (
-              <RenderGoalNode key={child.id} node={child} depth={depth + 1} />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   return (
-    <div className="min-h-screen text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
+    <div className="min-h-screen bg-[#0b0b0f] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
       
       {/* 🧭 ナビゲーションヘッダー */}
-      <div className="w-full max-w-6xl mb-4 flex items-center justify-between bg-[#16161A] border border-zinc-800 px-4 py-3 rounded-2xl shadow-lg">
+      <div className="w-full max-w-6xl mb-4 flex items-center justify-between bg-[#121218] border border-zinc-850 px-4 py-3 rounded-2xl shadow-lg">
         <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView("home")}>
           <div className="bg-gradient-to-tr from-cyan-500 to-blue-600 p-2 rounded-xl text-black shadow-md shadow-cyan-500/20">
             <Tv size={16} className="stroke-[2.5]" />
@@ -694,7 +721,7 @@ export default function VideoAnalyzer() {
             onClick={() => setView("home")}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
               view === "home"
-                ? "bg-zinc-800 text-white border-zinc-700 shadow-inner"
+                ? "bg-[#191924] text-white border-zinc-700 shadow-inner"
                 : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200"
             }`}
           >
@@ -702,12 +729,11 @@ export default function VideoAnalyzer() {
             <span className="hidden sm:inline">ホーム</span>
           </button>
           
-          {/* 🌳 目標ツリーのナビゲーションボタン */}
           <button
             onClick={() => setView("goals")}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
               view === "goals"
-                ? "bg-zinc-800 text-white border-zinc-700 shadow-inner"
+                ? "bg-[#191924] text-white border-zinc-700 shadow-inner"
                 : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200"
             }`}
           >
@@ -719,7 +745,7 @@ export default function VideoAnalyzer() {
             onClick={() => setView("analyzer")}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
               view === "analyzer"
-                ? "bg-zinc-800 text-white border-zinc-700 shadow-inner"
+                ? "bg-[#191924] text-white border-zinc-700 shadow-inner"
                 : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200"
             }`}
           >
@@ -729,13 +755,10 @@ export default function VideoAnalyzer() {
         </div>
       </div>
 
-      {/* ------------------------------------ */}
-      {/* 🏠 ホーム画面ビュー                   */}
-      {/* ------------------------------------ */}
+      {/* 🏠 ホーム画面ビュー */}
       {view === "home" && (
         <div className="w-full max-w-6xl space-y-6 animate-fadeIn">
-          {/* ウェルカムバナー */}
-          <div className="relative bg-gradient-to-r from-[#181822] to-[#121215] border border-zinc-800 rounded-3xl p-6 md:p-8 overflow-hidden shadow-xl">
+          <div className="relative bg-gradient-to-r from-[#121218] to-[#191924] border border-zinc-850 rounded-3xl p-6 md:p-8 overflow-hidden shadow-xl">
             <div className="absolute right-0 bottom-0 opacity-5 pointer-events-none transform translate-x-10 translate-y-10">
               <Tv size={300} />
             </div>
@@ -747,8 +770,8 @@ export default function VideoAnalyzer() {
                 一歩差をつける、ダンス解析。
               </h1>
               <p className="text-xs md:text-sm text-zinc-400 leading-relaxed">
-                コマ送り、ループ、画角ズーム、そして2画面のシンクロ比較。
-                自分のムーブを限界までディグって、スキルをネクストレベルへ引き上げよう。
+                コマ送り、ループ、画角ズーム、割る2画面シンクロ比較。
+                自分のムーブを限界までディグって、スキルをネクストレベルへ。
               </p>
               <div className="pt-3 flex flex-wrap items-center gap-2">
                 <button
@@ -770,23 +793,21 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          {/* クイック統計パネル */}
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            <div className="bg-[#121215] border border-zinc-800/80 p-4 rounded-2xl">
+            <div className="bg-[#121218] border border-zinc-800/60 p-4 rounded-2xl">
               <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">総セッション数</span>
               <div className="text-xl md:text-2xl font-black text-white mt-1 font-mono">{tabs.length} <span className="text-xs text-zinc-400 font-sans font-normal">動画</span></div>
             </div>
-            <div className="bg-[#121215] border border-zinc-800/80 p-4 rounded-2xl">
+            <div className="bg-[#121218] border border-zinc-800/60 p-4 rounded-2xl">
               <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">管理フォルダ</span>
               <div className="text-xl md:text-2xl font-black text-white mt-1 font-mono">{categories.length} <span className="text-xs text-zinc-400 font-sans font-normal">個</span></div>
             </div>
-            <div className="bg-[#121215] border border-zinc-800/80 p-4 rounded-2xl col-span-2 md:col-span-1">
-              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">メモが残された動画</span>
+            <div className="bg-[#121218] border border-zinc-800/60 p-4 rounded-2xl col-span-2 md:col-span-1">
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">メモがある動画</span>
               <div className="text-xl md:text-2xl font-black text-cyan-400 mt-1 font-mono">{tabs.filter(t => t.notes.trim()).length} <span className="text-xs text-zinc-400 font-sans font-normal">本</span></div>
             </div>
           </div>
 
-          {/* 📂 フォルダカード一覧 */}
           <div className="space-y-3">
             <h2 className="text-xs font-black text-zinc-400 tracking-wider uppercase flex items-center gap-1.5">
               <Folder size={12} className="text-cyan-400" /> フォルダショートカット
@@ -801,9 +822,9 @@ export default function VideoAnalyzer() {
                       setCurrentCategory(cat);
                       setView("analyzer");
                     }}
-                    className="bg-[#121215] border border-zinc-800 hover:border-zinc-700 p-4 rounded-2xl cursor-pointer transition-all hover:-translate-y-0.5 flex flex-col justify-between group h-28"
+                    className="bg-[#121218] border border-zinc-850 hover:border-zinc-700 p-4 rounded-2xl cursor-pointer transition-all hover:-translate-y-0.5 flex flex-col justify-between group h-28"
                   >
-                    <div className="bg-zinc-900 border border-zinc-800/60 p-2 rounded-xl w-fit text-zinc-400 group-hover:text-cyan-400 group-hover:border-zinc-700 transition-colors">
+                    <div className="bg-[#191924] border border-zinc-800/60 p-2 rounded-xl w-fit text-zinc-400 group-hover:text-cyan-400 group-hover:border-zinc-700 transition-colors">
                       <Folder size={16} />
                     </div>
                     <div>
@@ -816,7 +837,6 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          {/* 🎬 最近の練習セッション */}
           <div className="space-y-3">
             <h2 className="text-xs font-black text-zinc-400 tracking-wider uppercase flex items-center gap-1.5">
               <Clock size={12} className="text-emerald-400" /> 最近のセッション
@@ -829,13 +849,13 @@ export default function VideoAnalyzer() {
                     setActiveTabId(tab.id);
                     setView("analyzer");
                   }}
-                  className={`bg-[#121215] border p-4 rounded-2xl cursor-pointer transition-all flex flex-col justify-between gap-4 h-32 relative overflow-hidden group ${
-                    tab.id === activeTabId ? "border-cyan-500/40 shadow-md shadow-cyan-500/5 bg-[#14141c]" : "border-zinc-800 hover:border-zinc-700"
+                  className={`bg-[#121218] border p-4 rounded-2xl cursor-pointer transition-all flex flex-col justify-between gap-4 h-32 relative overflow-hidden group ${
+                    tab.id === activeTabId ? "border-cyan-500/40 shadow-md shadow-cyan-500/5 bg-[#191924]/40" : "border-zinc-850 hover:border-zinc-700"
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="space-y-1">
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 rounded text-cyan-400 uppercase font-mono tracking-wider">
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-950 border border-zinc-800 rounded text-cyan-400 uppercase font-mono tracking-wider">
                         {tab.category}
                       </span>
                       <h3 className="text-xs font-bold text-zinc-100 line-clamp-1 pt-1 group-hover:text-cyan-400 transition-colors">
@@ -862,17 +882,15 @@ export default function VideoAnalyzer() {
         </div>
       )}
 
-      {/* ------------------------------------ */}
-      {/* 🌳 目標ツリー画面ビュー               */}
-      {/* ------------------------------------ */}
+      {/* 🌳 目標ツリー画面ビュー */}
       {view === "goals" && (
-        <div className="w-full max-w-4xl bg-[#121215] border border-zinc-800 rounded-2xl shadow-2xl p-4 md:p-6 space-y-4 animate-fadeIn">
+        <div className="w-full max-w-4xl bg-[#121218] border border-zinc-850 rounded-2xl shadow-2xl p-4 md:p-6 space-y-4 animate-fadeIn">
           <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
             <div className="flex items-center gap-2">
               <GitFork className="text-cyan-400 rotate-90" size={18} />
               <div>
                 <h2 className="text-sm md:text-base font-black tracking-wider text-white uppercase">枝分かれ目標マップ</h2>
-                <p className="text-[11px] text-zinc-500">大目標から要素を分解し、具体的な練習メニューへ枝を伸ばします。右端の「＋」で枝を追加。</p>
+                <p className="text-[11px] text-zinc-500">大目標から要素を分解し、具体的な練習メニューへ枝を伸ばします。</p>
               </div>
             </div>
             <button onClick={exportBackup} className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all">
@@ -881,21 +899,27 @@ export default function VideoAnalyzer() {
             </button>
           </div>
 
-          {/* ツリー本体の描画コンポーネントを呼び出し */}
-          <div className="bg-[#16161A]/50 border border-zinc-800/60 rounded-2xl p-2 md:p-4 min-h-[400px] overflow-x-auto">
-            <RenderGoalNode node={goalRoot} depth={0} />
+          <div className="bg-[#0b0b0f]/60 border border-zinc-850 rounded-2xl p-2 md:p-4 min-h-[400px] overflow-x-auto">
+            {/* ✨ 追い出した子コンポーネントをProps付きで呼び出し */}
+            <RenderGoalNode 
+              node={goalRoot} 
+              depth={0} 
+              onToggleExpand={handleToggleGoalExpand}
+              onToggleComplete={handleToggleGoalComplete}
+              onUpdateText={handleUpdateGoalText}
+              onAddChild={handleAddChildGoal}
+              onDelete={handleDeleteGoal}
+            />
           </div>
         </div>
       )}
 
-      {/* ------------------------------------ */}
-      {/* 🎥 ビデオ解析画面ビュー               */}
-      {/* ------------------------------------ */}
+      {/* 🎥 ビデオ解析画面ビュー */}
       {view === "analyzer" && (
-        <div className="w-full max-w-6xl bg-[#121215] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn">
+        <div className="w-full max-w-6xl bg-[#121218] border border-zinc-850 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn">
           
           {/* フォルダバー */}
-          <div className="bg-[#1a1a22] border-b border-zinc-800 p-2 flex flex-col md:flex-row md:items-center gap-2 justify-between">
+          <div className="bg-[#191924] border-b border-zinc-850 p-2 flex flex-col md:flex-row md:items-center gap-2 justify-between">
             <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
               <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs whitespace-nowrap">
                 <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
@@ -936,14 +960,14 @@ export default function VideoAnalyzer() {
 
           {/* フォルダ管理パネル */}
           {isManagingCats && (
-            <div className="bg-[#15151a] border-b border-zinc-800 p-3 flex flex-col gap-3">
+            <div className="bg-[#0b0b0f] border-b border-zinc-850 p-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <input type="text" placeholder="新しいフォルダ名" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCategory()} className="bg-zinc-900 text-xs text-white border border-zinc-800 rounded-xl px-3 py-1.5 focus:outline-none" />
-                <button onClick={addCategory} className="bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} />追加</button>
+                <button onClick={addCategory} className="bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} fill="currentColor" />追加</button>
               </div>
-              <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-800/40">
+              <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-850/40">
                 {categories.map((cat) => (
-                  <div key={cat} className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300">
+                  <div key={cat} className="flex items-center gap-1 bg-[#121218] border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300">
                     <input type="text" value={cat} onChange={(e) => {
                       const newName = e.target.value;
                       setCategories(categories.map((c) => (c === cat ? newName : c)));
@@ -957,19 +981,42 @@ export default function VideoAnalyzer() {
           )}
 
           {/* タブバー */}
-          <div className="bg-[#16161A] border-b border-zinc-800 p-2 md:p-3 flex items-center justify-between gap-2 overflow-x-auto">
+          <div className="bg-[#121218] border-b border-zinc-850 p-2 md:p-3 flex items-center justify-between gap-2 overflow-x-auto">
             <div className="flex items-center gap-1.5 overflow-x-auto max-w-full no-scrollbar">
               {filteredTabs.map((tab) => (
-                <div key={tab.id} onClick={() => setActiveTabId(tab.id)} className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border shrink-0 ${tab.id === activeTabId ? "bg-zinc-800 text-white border-zinc-700 shadow-sm" : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"}`}>
+                <div key={tab.id} onClick={() => setActiveTabId(tab.id)} className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border shrink-0 ${tab.id === activeTabId ? "bg-[#191924] text-white border-zinc-700 shadow-sm" : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"}`}>
+                  
                   {editingTabId === tab.id ? (
-                    <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                    <input type="text" value={editName} onChange={(e) => setEditName(e.target.value)} onBlur={saveRename} onKeyDown={(e) => e.key === "Enter" && saveRename()} autoFocus className="bg-zinc-900 text-white border border-zinc-700 rounded px-1.5 py-0.5 w-20 text-xs focus:outline-none" />
-                      <select value={tab.category} onChange={(e) => {
-                        const newCat = e.target.value;
-                        setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t)));
-                      }} className="bg-zinc-950 text-cyan-400 border border-zinc-800 rounded px-1 py-0.5 text-[10px] font-bold focus:outline-none">
+                    <div className="flex items-center gap-1.5 bg-zinc-950/60 border border-zinc-800 rounded-xl p-1 shadow-inner animate-fadeIn" onClick={(e) => e.stopPropagation()}>
+                      <input 
+                        type="text" 
+                        value={editName} 
+                        onChange={(e) => setEditName(e.target.value)} 
+                        onKeyDown={(e) => e.key === "Enter" && saveRename()} 
+                        autoFocus 
+                        className="bg-[#0b0b0f] text-white border border-zinc-800 rounded px-1.5 py-0.5 w-24 text-xs focus:outline-none" 
+                      />
+                      <select 
+                        value={editCategory} 
+                        onChange={(e) => setEditCategory(e.target.value)} 
+                        className="bg-[#0b0b0f] text-cyan-400 border border-zinc-800 rounded px-1 py-0.5 text-[10px] font-bold focus:outline-none cursor-pointer"
+                      >
                         {categories.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
+                      <button 
+                        onClick={saveRename} 
+                        className="p-1 bg-cyan-500 text-black rounded hover:bg-cyan-400 transition-colors" 
+                        title="変更を保存"
+                      >
+                        <Check size={10} className="stroke-[3]" />
+                      </button>
+                      <button 
+                        onClick={() => setEditingTabId(null)} 
+                        className="p-1 bg-zinc-800 text-zinc-400 rounded hover:text-zinc-200 transition-colors" 
+                        title="キャンセル"
+                      >
+                        <X size={10} />
+                      </button>
                     </div>
                   ) : (
                     <span className="flex items-center gap-1.5" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
@@ -987,12 +1034,11 @@ export default function VideoAnalyzer() {
             <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="video/*" className="hidden" />
           </div>
 
-          {/* メインレイアウト */}
-          <div className="flex flex-col lg:flex-row border-b border-zinc-800">
-            <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
+          {/* メインビデオレイアウト */}
+          <div className="flex flex-col lg:flex-row border-b border-zinc-850">
+            <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-850">
               
-              <div className={`relative flex flex-col md:flex-row items-center justify-center p-2 gap-2 bg-[#050506] ${compareMode && compareTab ? "" : "aspect-video"}`}>
-                {/* メイン動画 */}
+              <div className={`relative flex flex-col md:flex-row items-center justify-center p-2 gap-2 bg-black ${compareMode && compareTab ? "" : "aspect-video"}`}>
                 <div className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border border-zinc-900/80 w-full ${compareMode && compareTab ? "aspect-video md:w-1/2" : "h-full"}`}>
                   {activeTab.videoSrc ? (
                     <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
@@ -1001,7 +1047,7 @@ export default function VideoAnalyzer() {
                           <video ref={videoRef} key={activeTab.id} src={activeTab.videoSrc || ""} playsInline className={`w-full h-full object-contain ${activeTab.isMirrored ? "scale-x-[-1]" : ""}`} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onTimeUpdate={handleTimeUpdate} onLoadedMetadata={() => videoRef.current && setDuration(videoRef.current.duration)} onClick={togglePlay} />
                           {activeTab.showGrid && (
                             <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
-                              <div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-dashed border-white/50"></div><div className="border-r border-dashed border-white/50"></div><div></div>
+                              <div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r dashed border-white/50"></div><div className="border-r dashed border-white/50"></div><div></div>
                             </div>
                           )}
                         </div>
@@ -1019,7 +1065,6 @@ export default function VideoAnalyzer() {
                   )}
                 </div>
 
-                {/* 👥 比較用動画 */}
                 {compareMode && compareTab && (
                   <div className="relative overflow-hidden flex items-center justify-center bg-black rounded-xl border border-zinc-800 w-full aspect-video md:w-1/2">
                     {compareTab.videoSrc ? (
@@ -1029,7 +1074,7 @@ export default function VideoAnalyzer() {
                             <video ref={compareVideoRef} src={compareTab.videoSrc || ""} playsInline className={`w-full h-full object-contain ${compareTab.isMirrored ? "scale-x-[-1]" : ""}`} onClick={() => { if (syncPlay) { togglePlay(); } else { if (compareVideoRef.current) { if (compareVideoRef.current.paused) compareVideoRef.current.play().catch(() => {}); else compareVideoRef.current.pause(); } } }} />
                             {compareTab.showGrid && (
                               <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none z-10">
-                                <div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-dashed border-white/50"></div><div className="border-r border-dashed border-white/50"></div><div></div>
+                                <div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-r border-b border-dashed border-white/50"></div><div className="border-b border-dashed border-white/50"></div><div className="border-r dashed border-white/50"></div><div className="border-r dashed border-white/50"></div><div></div>
                               </div>
                             )}
                           </div>
@@ -1045,9 +1090,7 @@ export default function VideoAnalyzer() {
 
               {/* コントローラー */}
               {activeTab.videoSrc && (
-                <div className="p-3 md:p-4 bg-[#121215] space-y-4 border-t border-zinc-800/80">
-                  
-                  {/* カスタムシークバー */}
+                <div className="p-3 md:p-4 bg-[#121218] space-y-4 border-t border-t-zinc-850">
                   <div className="flex items-center gap-3">
                     <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
                     <div className="relative flex-1 h-6 flex items-center">
@@ -1062,7 +1105,6 @@ export default function VideoAnalyzer() {
                     <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
                   </div>
 
-                  {/* 2画面比較コントロール */}
                   <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <div className="flex items-center gap-2">
                       <button 
@@ -1093,7 +1135,6 @@ export default function VideoAnalyzer() {
                     )}
                   </div>
 
-                  {/* ボタン系 */}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-1.5">
                       <button onClick={() => stepFrame("backward", 1)} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
@@ -1116,13 +1157,11 @@ export default function VideoAnalyzer() {
                     </div>
                   </div>
 
-                  {/* スピード */}
                   <div className="flex items-center gap-3 pt-1">
                     <span className="text-[10px] font-bold text-zinc-500 tracking-wider whitespace-nowrap">SPEED: {activeTab.playbackRate.toFixed(2)}x</span>
                     <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-cyan-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                   </div>
 
-                  {/* ズームパネル */}
                   {showZoomPanel && (
                     <div className="pt-3 border-t border-zinc-800/60 space-y-2 bg-black/40 p-2.5 rounded-xl border border-zinc-900 animate-fadeIn">
                       <div className="flex items-center justify-between"><span className="text-[10px] font-bold text-cyan-400 tracking-wider flex items-center gap-1"><ZoomIn size={12} /> 画角ズーム調整中: {activeTab.zoom.toFixed(1)}x</span>{(activeTab.zoom !== 1 || activeTab.panX !== 0 || activeTab.panY !== 0) && (<button onClick={() => updateActiveTab({ zoom: 1, panX: 0, panY: 0 })} className="text-[9px] text-cyan-400 bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-cyan-500/20">位置リセット</button>)}</div>
@@ -1138,14 +1177,14 @@ export default function VideoAnalyzer() {
               )}
             </div>
 
-            {/* 右側メモ */}
-            <div className="w-full lg:w-[360px] xl:w-[400px] bg-[#121215] flex flex-col p-4 space-y-3 min-h-[300px] lg:min-h-0">
+            {/* 右側練習ノート */}
+            <div className="w-full lg:w-[360px] xl:w-[400px] bg-[#121218] flex flex-col p-4 space-y-3 min-h-[300px] lg:min-h-0">
               <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2 gap-2">
                 <div className="flex items-center gap-2 text-zinc-400"><FileText size={14} /><h2 className="text-xs font-bold tracking-wider uppercase">練習ノート</h2></div>
                 {activeTab.videoSrc && <button onClick={insertTimestamp} className="flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"><Clock size={12} /><span>タイムスタンプ挿入</span></button>}
               </div>
-              <textarea value={activeTab.notes} onChange={(e) => updateActiveTab({ notes: e.target.value })} placeholder="例:&#10;1:02 ここの足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！" className="w-full h-24 lg:h-32 bg-[#16161A] border border-zinc-800 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none font-sans leading-relaxed" />
-              <div className="flex-1 bg-[#16161A]/50 border border-zinc-800/60 rounded-xl p-3 overflow-y-auto text-xs text-zinc-300 font-sans leading-loose max-h-[200px] lg:max-h-none">
+              <textarea value={activeTab.notes} onChange={(e) => updateActiveTab({ notes: e.target.value })} placeholder="例:&#10;1:02 ここの足のキャッチが遅い&#10;0:45 軸をまっすぐにする意識！" className="w-full h-24 lg:h-32 bg-[#0b0b0f] border border-zinc-850 rounded-xl p-3 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none resize-none font-sans leading-relaxed" />
+              <div className="flex-1 bg-[#0b0b0f]/50 border border-zinc-850 rounded-xl p-3 overflow-y-auto text-xs text-zinc-300 font-sans leading-loose max-h-[200px] lg:max-h-none">
                 {renderNotesWithTimestamps(activeTab.notes)}
               </div>
             </div>
