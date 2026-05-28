@@ -19,6 +19,9 @@ import {
   RefreshCw,
   Plus,
   ZoomIn,
+  Save,
+  FolderOpen,
+  Download,
 } from "lucide-react";
 
 interface VideoTab {
@@ -146,6 +149,7 @@ export default function VideoAnalyzer() {
   const [editName, setEditName] = useState("");
   const [isManagingCats, setIsManagingCats] = useState(false);
   const [newCatName, setNewCatName] = useState("");
+  const [showZoomPanel, setShowZoomPanel] = useState(false); // ズームパネル開閉状態
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -352,6 +356,74 @@ export default function VideoAnalyzer() {
     }
   };
 
+  // 【A案】バックアップ書き出し機能
+  const exportBackup = () => {
+    const data = {
+      categories,
+      tabs: tabs.map((t) => ({ ...t, videoSrc: null })),
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dance-analyst-backup-${new Date().toISOString().split("T")[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // 【A案】バックアップ復元機能
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const data = JSON.parse(event.target?.result as string);
+        if (data.categories && data.tabs) {
+          setCategories(data.categories);
+
+          // 復元したタブに対してIndexedDB内に動画があれば即座に紐付け直す
+          const tabsWithVideos = await Promise.all(
+            data.tabs.map(async (tab: any) => {
+              const videoFile = await getVideoFromDB(tab.id);
+              if (!videoFile) return { ...tab, videoSrc: null };
+              return { ...tab, videoSrc: URL.createObjectURL(videoFile) };
+            })
+          );
+
+          setTabs(tabsWithVideos);
+          if (tabsWithVideos.length > 0) {
+            setActiveTabId(tabsWithVideos[0].id);
+          }
+          alert("練習データを正常に復元しました！");
+        }
+      } catch (err) {
+        alert("バックアップファイルの読み込みに失敗しました。");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // 【新設】現在読み込んでいる動画ファイルをそのままデバイスにダウンロードする機能
+  const downloadCurrentVideo = async () => {
+    if (!activeTab.id || !activeTab.videoSrc) return;
+    try {
+      const file = await getVideoFromDB(activeTab.id);
+      if (file) {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = activeTab.name.includes(".") ? activeTab.name : `${activeTab.name}.mp4`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } else {
+        alert("動画ファイルがブラウザに見つかりません。");
+      }
+    } catch (err) {
+      console.error("動画の保存に失敗しました:", err);
+    }
+  };
+
   const renderNotesWithTimestamps = (text: string) => {
     if (!text) return <span className="text-zinc-600 text-xs">ここにメモを入力するか、「⏱️ タイムスタンプ挿入」を押してください。</span>;
     return text.split("\n").map((line, i) => {
@@ -410,7 +482,24 @@ export default function VideoAnalyzer() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-end md:self-auto">
+          {/* 右側アクション群（A案 バックアップ機能追加） */}
+          <div className="flex items-center gap-1.5 self-end md:self-auto flex-wrap">
+            <button
+              onClick={exportBackup}
+              className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all"
+              title="ノートや設定をファイルにエクスポート"
+            >
+              <Save size={12} className="text-emerald-400" />
+              <span>データ保存</span>
+            </button>
+            <label
+              className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
+              title="バックアップファイルを読み込んで復元"
+            >
+              <FolderOpen size={12} className="text-sky-400" />
+              <span>データ復元</span>
+              <input type="file" accept=".json" onChange={handleImportBackup} className="hidden" />
+            </label>
             <button
               onClick={() => setIsManagingCats(!isManagingCats)}
               className={`p-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${
@@ -516,7 +605,7 @@ export default function VideoAnalyzer() {
         <div className="flex flex-col lg:flex-row border-b border-zinc-800">
           <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800">
             
-            {/* ビデオプレイヤー外枠コンテナ（はみ出し防止） */}
+            {/* ビデオプレイヤー外枠コンテナ */}
             <div className="relative aspect-video flex items-center justify-center p-2 overflow-hidden bg-[#050506]">
               {activeTab.videoSrc ? (
                 <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
@@ -562,7 +651,7 @@ export default function VideoAnalyzer() {
                     </div>
                   </div>
 
-                  {/* ループ表示バッジ（画面固定） */}
+                  {/* ループ表示バッジ */}
                   {(activeTab.loopStart !== null || activeTab.loopEnd !== null) && (
                     <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-amber-400 z-20 flex items-center gap-1.5 border border-amber-500/30">
                       <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
@@ -584,10 +673,8 @@ export default function VideoAnalyzer() {
                   <span className="text-[10px] font-mono text-zinc-400 w-8">{formatTime(currentTime)}</span>
                   
                   <div className="relative flex-1 h-6 flex items-center">
-                    {/* ベースの背景レール */}
                     <div className="absolute left-0 right-0 h-1 bg-zinc-800 rounded-lg pointer-events-none"></div>
                     
-                    {/* A-B点間の範囲ハイライト */}
                     {activeTab.loopStart !== null && activeTab.loopEnd !== null && duration > 0 && (
                       <div 
                         className="absolute h-1 bg-amber-500/40 pointer-events-none"
@@ -598,23 +685,14 @@ export default function VideoAnalyzer() {
                       />
                     )}
                     
-                    {/* A点（開始）の縦線マーカー */}
                     {activeTab.loopStart !== null && duration > 0 && (
-                      <div 
-                        className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10"
-                        style={{ left: `${(activeTab.loopStart / duration) * 100}%` }}
-                      />
+                      <div className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopStart / duration) * 100}%` }} />
                     )}
                     
-                    {/* B点（終了）の縦線マーカー */}
                     {activeTab.loopEnd !== null && duration > 0 && (
-                      <div 
-                        className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10"
-                        style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }}
-                      />
+                      <div className="absolute h-3 w-0.5 bg-amber-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }} />
                     )}
                     
-                    {/* 透明な本物の操作スライダーを重ねる */}
                     <input 
                       type="range" 
                       min={0} 
@@ -645,10 +723,13 @@ export default function VideoAnalyzer() {
                     )}
                   </div>
 
-                  <div className="flex items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 text-[11px]">
+                  {/* 強化されたコントロール行（ズーム・動画保存ボタンの追加） */}
+                  <div className="flex flex-wrap items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 text-[11px]">
                     <button onClick={() => updateActiveTab({ isMirrored: !activeTab.isMirrored })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.isMirrored ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><FlipHorizontal size={12} />ミラー</button>
                     <button onClick={() => updateActiveTab({ rotation: (activeTab.rotation + 90) % 360 })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.rotation !== 0 ? "bg-zinc-800 text-amber-400" : "text-zinc-500"}`}><RotateCw size={12} />{activeTab.rotation}°</button>
                     <button onClick={() => updateActiveTab({ showGrid: !activeTab.showGrid })} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 ${activeTab.showGrid ? "bg-zinc-800 text-white" : "text-zinc-500"}`}><Grid size={12} />グリッド</button>
+                    <button onClick={() => setShowZoomPanel(!showZoomPanel)} className={`px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold ${showZoomPanel ? "bg-amber-500 text-black shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}><ZoomIn size={12} />ズーム</button>
+                    <button onClick={downloadCurrentVideo} className="px-2.5 py-1 rounded-lg flex items-center gap-1 text-zinc-400 hover:text-zinc-200" title="動画をカメラロールや本体に保存"><Download size={12} />保存</button>
                   </div>
                 </div>
 
@@ -658,68 +739,70 @@ export default function VideoAnalyzer() {
                   <input type="range" min={0.25} max={2.0} step={0.05} value={activeTab.playbackRate} onChange={(e) => updateActiveTab({ playbackRate: parseFloat(e.target.value) })} className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" />
                 </div>
 
-                {/* 【新設】画角ズーム ＋ 位置調整スライダー（切り取り機能の代わり） */}
-                <div className="pt-3 border-t border-zinc-800/40 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-zinc-500 tracking-wider flex items-center gap-1">
-                      <ZoomIn size={12} /> 画角ズーム: {activeTab.zoom.toFixed(1)}x
-                    </span>
-                    {(activeTab.zoom !== 1 || activeTab.panX !== 0 || activeTab.panY !== 0) && (
-                      <button 
-                        onClick={() => updateActiveTab({ zoom: 1, panX: 0, panY: 0 })}
-                        className="text-[9px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-amber-500/20"
-                      >
-                        ズーム・位置リセット
-                      </button>
-                    )}
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {/* 倍率 */}
-                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
-                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">拡大率</span>
-                      <input 
-                        type="range" 
-                        min={1.0} 
-                        max={3.0} 
-                        step={0.1} 
-                        value={activeTab.zoom} 
-                        onChange={(e) => updateActiveTab({ zoom: parseFloat(e.target.value) })} 
-                        className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" 
-                      />
+                {/* 【隠せる開閉式に改良】画角ズーム ＋ 位置調整スライダー */}
+                {showZoomPanel && (
+                  <div className="pt-3 border-t border-zinc-800/60 space-y-2 bg-black/40 p-2.5 rounded-xl border border-zinc-900 animate-fadeIn">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-amber-400 tracking-wider flex items-center gap-1">
+                        <ZoomIn size={12} /> 画角ズーム調整中: {activeTab.zoom.toFixed(1)}x
+                      </span>
+                      {(activeTab.zoom !== 1 || activeTab.panX !== 0 || activeTab.panY !== 0) && (
+                        <button 
+                          onClick={() => updateActiveTab({ zoom: 1, panX: 0, panY: 0 })}
+                          className="text-[9px] text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded font-bold transition-all hover:bg-amber-500/20"
+                        >
+                          位置リセット
+                        </button>
+                      )}
                     </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {/* 倍率 */}
+                      <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
+                        <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">拡大率</span>
+                        <input 
+                          type="range" 
+                          min={1.0} 
+                          max={3.0} 
+                          step={0.1} 
+                          value={activeTab.zoom} 
+                          onChange={(e) => updateActiveTab({ zoom: parseFloat(e.target.value) })} 
+                          className="flex-1 accent-amber-400 bg-zinc-800 h-1 rounded-lg appearance-none cursor-pointer" 
+                        />
+                      </div>
 
-                    {/* 左右位置 */}
-                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
-                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">左右移動</span>
-                      <input 
-                        type="range" 
-                        min={-300} 
-                        max={300} 
-                        step={1} 
-                        value={activeTab.panX} 
-                        disabled={activeTab.zoom === 1}
-                        onChange={(e) => updateActiveTab({ panX: parseInt(e.target.value) })} 
-                        className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
-                      />
-                    </div>
+                      {/* 左右位置 */}
+                      <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
+                        <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">左右移動</span>
+                        <input 
+                          type="range" 
+                          min={-300} 
+                          max={300} 
+                          step={1} 
+                          value={activeTab.panX} 
+                          disabled={activeTab.zoom === 1}
+                          onChange={(e) => updateActiveTab({ panX: parseInt(e.target.value) })} 
+                          className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
+                        />
+                      </div>
 
-                    {/* 上下位置 */}
-                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-zinc-900">
-                      <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">上下移動</span>
-                      <input 
-                        type="range" 
-                        min={-300} 
-                        max={300} 
-                        step={1} 
-                        value={activeTab.panY} 
-                        disabled={activeTab.zoom === 1}
-                        onChange={(e) => updateActiveTab({ panY: parseInt(e.target.value) })} 
-                        className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
-                      />
+                      {/* 上下位置 */}
+                      <div className="flex items-center gap-2 bg-zinc-950 p-1.5 rounded-xl border border-zinc-800/80">
+                        <span className="text-[9px] text-zinc-400 w-12 font-medium pl-1">上下移動</span>
+                        <input 
+                          type="range" 
+                          min={-300} 
+                          max={300} 
+                          step={1} 
+                          value={activeTab.panY} 
+                          disabled={activeTab.zoom === 1}
+                          onChange={(e) => updateActiveTab({ panY: parseInt(e.target.value) })} 
+                          className={`flex-1 h-1 rounded-lg appearance-none cursor-pointer ${activeTab.zoom === 1 ? "accent-zinc-600 bg-zinc-900 cursor-not-allowed" : "accent-white bg-zinc-800"}`} 
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
 
               </div>
             )}
