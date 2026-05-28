@@ -14,6 +14,8 @@ import {
   RotateCw,
   FileText,
   Edit2,
+  Folder,
+  Clock,
 } from "lucide-react";
 
 interface VideoTab {
@@ -25,10 +27,14 @@ interface VideoTab {
   showGrid: boolean;
   playbackRate: number;
   notes: string;
+  category: string; // 【追加】フォルダ（カテゴリ）分類用
 }
 
 const DB_NAME = "video-analyzer-db";
 const STORE_NAME = "videos";
+
+// 固定のフォルダ（カテゴリ）リスト
+const CATEGORIES = ["すべて", "フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"];
 
 // IndexedDB のオープン
 const openDB = (): Promise<IDBDatabase> => {
@@ -87,10 +93,10 @@ export default function VideoAnalyzer() {
       const savedTabs = localStorage.getItem("video-analyzer-tabs");
       if (savedTabs) {
         const parsedTabs: VideoTab[] = JSON.parse(savedTabs);
-        // 初期化時は一律でvideoSrcをnullにして、IndexedDBからの自動復元を待つ
         return parsedTabs.map((tab) => ({
           ...tab,
           videoSrc: null,
+          category: tab.category || "その他", // 互換性担保
         }));
       }
     }
@@ -105,6 +111,7 @@ export default function VideoAnalyzer() {
         showGrid: false,
         playbackRate: 1,
         notes: "",
+        category: "その他",
       },
     ];
   });
@@ -117,6 +124,9 @@ export default function VideoAnalyzer() {
     return "tab-1";
   });
 
+  // 【追加】現在選択されているフォルダ（カテゴリ）のステート
+  const [currentCategory, setCurrentCategory] = useState("すべて");
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -128,15 +138,26 @@ export default function VideoAnalyzer() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
 
-  // ==========================================
-  // 🔥 【統合】アプリ起動時に全タブの動画を一括復元するロジック
-  // ==========================================
+  // フォルダ（カテゴリ）でフィルタリングされたタブ一覧
+  const filteredTabs = tabs.filter(
+    (tab) => currentCategory === "すべて" || tab.category === currentCategory
+  );
+
+  // フォルダを切り替えた時、現在のアクティブタブがそのフォルダ内に無ければ、自動でフォルダ内の先頭タブに切り替える
+  const handleCategoryChange = (cat: string) => {
+    setCurrentCategory(cat);
+    const matches = tabs.filter((t) => cat === "すべて" || t.category === cat);
+    if (matches.length > 0 && !matches.some((t) => t.id === activeTabId)) {
+      setActiveTabId(matches[0].id);
+    }
+  };
+
+  // アプリ起動時に全タブの動画を一括復元するロジック
   useEffect(() => {
     const restoreVideos = async () => {
       try {
         const updatedTabs = await Promise.all(
           tabs.map(async (tab) => {
-            // 既存の識別子である tab.id を使用して IndexedDB から動画を取得
             const file = await getVideoFromDB(tab.id);
             if (!file) return tab;
 
@@ -154,9 +175,9 @@ export default function VideoAnalyzer() {
 
     restoreVideos();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // 初回マウント時のみ実行
+  }, []);
 
-  // 自動保存（localStorageにはUI状態とノートだけを安全に保存）
+  // 自動保存（localStorageにはUI状態、ノート、カテゴリだけを安全に保存）
   useEffect(() => {
     const safeTabs = tabs.map((tab) => ({
       ...tab,
@@ -188,6 +209,18 @@ export default function VideoAnalyzer() {
     }
   }, [activeTabId, activeTab.playbackRate, activeTab.videoSrc]);
 
+  // 【追加】現在の再生時間をメモにワンプッシュ挿入する関数
+  const insertTimestamp = () => {
+    if (!videoRef.current) return;
+    const timeStr = formatTime(videoRef.current.currentTime);
+    
+    // 現在のメモの末尾に、綺麗に改行を挟んで挿入する
+    const hasNewline = activeTab.notes.endsWith("\n") || activeTab.notes === "";
+    const newNotes = activeTab.notes + (hasNewline ? "" : "\n") + `${timeStr} `;
+    
+    updateActiveTab({ notes: newNotes });
+  };
+
   const addNewTab = () => {
     const newId = `tab-${Date.now()}`;
     const newTab: VideoTab = {
@@ -199,6 +232,7 @@ export default function VideoAnalyzer() {
       showGrid: false,
       playbackRate: 1,
       notes: "",
+      category: currentCategory === "すべて" ? "その他" : currentCategory, // いま開いているフォルダをデフォルトにする親切設計
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(newId);
@@ -214,11 +248,16 @@ export default function VideoAnalyzer() {
     setTabs(filtered);
 
     if (activeTabId === idToClose) {
-      setActiveTabId(filtered[filtered.length - 1].id);
+      // フィルター後の表示中タブから次なるアクティブを選ぶ
+      const remMatches = filtered.filter((t) => currentCategory === "すべて" || t.category === currentCategory);
+      if (remMatches.length > 0) {
+        setActiveTabId(remMatches[remMatches.length - 1].id);
+      } else if (filtered.length > 0) {
+        setActiveTabId(filtered[filtered.length - 1].id);
+      }
     }
     setIsPlaying(false);
 
-    // バックグラウンドでIndexedDBから動画を削除
     try {
       await deleteVideoFromDB(idToClose);
     } catch (err) {
@@ -241,7 +280,6 @@ export default function VideoAnalyzer() {
     setEditingTabId(null);
   };
 
-  // ファイル選択時、状態の更新だけでなく IndexedDB にも非同期でファイルを保存する
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -253,7 +291,6 @@ export default function VideoAnalyzer() {
       });
       setIsPlaying(false);
 
-      // IndexedDBに動画ファイル本体を保存
       try {
         await saveVideoToDB(activeTabId, file);
       } catch (err) {
@@ -312,7 +349,7 @@ export default function VideoAnalyzer() {
     if (!text) {
       return (
         <span className="text-zinc-600 text-xs">
-          ここにメモを入力すると、タイムスタンプが自動生成されます。
+          ここにメモを入力するか、上の「⏱️ タイムスタンプ」を押すと自動生成されます。
         </span>
       );
     }
@@ -368,10 +405,36 @@ export default function VideoAnalyzer() {
     <div className="min-h-screen bg-[#0A0A0C] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
       <div className="w-full max-w-6xl bg-[#121215] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
         
+        {/* ================= 【新機能】フォルダ（カテゴリ）切り替えバー ================= */}
+        <div className="bg-[#1a1a22] border-b border-zinc-800 p-2 flex items-center gap-1 overflow-x-auto no-scrollbar">
+          <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs">
+            <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
+              <Folder size={12} className="text-amber-400" />
+              <span>フォルダ:</span>
+            </div>
+            {CATEGORIES.map((cat) => (
+              <button
+                key={cat}
+                onClick={() => handleCategoryChange(cat)}
+                className={`px-3 py-1 rounded-lg font-medium transition-all ${
+                  currentCategory === cat
+                    ? "bg-amber-500 text-black font-bold shadow-md"
+                    : "text-zinc-400 hover:text-zinc-200"
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+          <span className="text-[10px] text-zinc-500 ml-auto hidden md:inline px-2">
+            ※ダブルクリック（またはタップ）で名前と所属フォルダを変更可能
+          </span>
+        </div>
+
         {/* ================= タブバー ================= */}
         <div className="bg-[#16161A] border-b border-zinc-800 p-2 md:p-3 flex items-center justify-between gap-2 overflow-x-auto">
           <div className="flex items-center gap-1.5 overflow-x-auto max-w-full no-scrollbar">
-            {tabs.map((tab) => (
+            {filteredTabs.map((tab) => (
               <div
                 key={tab.id}
                 onClick={() => { setActiveTabId(tab.id); }}
@@ -382,18 +445,35 @@ export default function VideoAnalyzer() {
                 }`}
               >
                 {editingTabId === tab.id ? (
-                  <input
-                    type="text"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    onBlur={saveRename}
-                    onKeyDown={(e) => e.key === "Enter" && saveRename()}
-                    autoFocus
-                    className="bg-zinc-900 text-white border border-zinc-700 rounded px-1 py-0.5 w-20 text-xs focus:outline-none"
-                    onClick={(e) => e.stopPropagation()}
-                  />
+                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onBlur={saveRename}
+                      onKeyDown={(e) => e.key === "Enter" && saveRename()}
+                      autoFocus
+                      className="bg-zinc-900 text-white border border-zinc-700 rounded px-1 py-0.5 w-20 text-xs focus:outline-none"
+                    />
+                    {/* 【新機能】編集モード時に所属フォルダをセレクトボックスで変更可能 */}
+                    <select
+                      value={tab.category}
+                      onChange={(e) => {
+                        const newCat = e.target.value;
+                        setTabs((prev) =>
+                          prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t))
+                        );
+                      }}
+                      className="bg-zinc-900 text-zinc-300 border border-zinc-700 rounded px-1 py-0.5 text-[10px] focus:outline-none cursor-pointer"
+                    >
+                      {CATEGORIES.filter(c => c !== "すべて").map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
                 ) : (
-                  <span className="flex items-center gap-1" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
+                  <span className="flex items-center gap-1.5" onDoubleClick={(e) => startRename(tab, e)} onClick={(e) => tab.id === activeTabId && startRename(tab, e)}>
+                    <span className="text-[10px] px-1 py-0.2 bg-zinc-900 rounded text-zinc-400 border border-zinc-700/60 font-mono">{tab.category}</span>
                     {tab.name}
                     <Edit2 size={10} className="opacity-40" />
                   </span>
@@ -403,6 +483,9 @@ export default function VideoAnalyzer() {
                 )}
               </div>
             ))}
+            {filteredTabs.length === 0 && (
+              <span className="text-xs text-zinc-600 px-2">このフォルダは空です</span>
+            )}
             <button onClick={addNewTab} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400"><Plus size={12} /></button>
           </div>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-200 text-black text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap"><Upload size={12} />動画読込</button>
@@ -487,9 +570,24 @@ export default function VideoAnalyzer() {
 
           {/* 右側：メモ＆タイムスタンププレビュー */}
           <div className="w-full lg:w-[360px] xl:w-[400px] bg-[#121215] flex flex-col p-4 space-y-3 min-h-[300px] lg:min-h-0">
-            <div className="flex items-center gap-2 text-zinc-400 border-b border-zinc-800/60 pb-2">
-              <FileText size={14} />
-              <h2 className="text-xs font-bold tracking-wider uppercase">練習ノート & タイムスタンプ</h2>
+            
+            {/* メモ帳ヘッダー ＆ 【新機能】タイムスタンプ一発挿入ボタン */}
+            <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2 gap-2">
+              <div className="flex items-center gap-2 text-zinc-400">
+                <FileText size={14} />
+                <h2 className="text-xs font-bold tracking-wider uppercase">練習ノート</h2>
+              </div>
+              
+              {/* ⏱️ タイムスタンプ一発挿入ボタン */}
+              {activeTab.videoSrc && (
+                <button
+                  onClick={insertTimestamp}
+                  className="flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[11px] px-2.5 py-1 rounded-xl transition-all font-bold shadow-sm"
+                >
+                  <Clock size={12} />
+                  <span>タイムスタンプ挿入</span>
+                </button>
+              )}
             </div>
             
             {/* テキストエディタ欄 */}
