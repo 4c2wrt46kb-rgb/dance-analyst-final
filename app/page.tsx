@@ -280,6 +280,12 @@ export default function VideoAnalyzer() {
   );
 
   useEffect(() => {
+    // 🛠️ スマホのブラウザ自体（最背面のベース）を強制的にアプリカラーの黒に染める
+    if (typeof window !== "undefined") {
+      document.body.style.backgroundColor = "#0b0b0f";
+      document.documentElement.style.backgroundColor = "#0b0b0f";
+    }
+
     const savedGoals = localStorage.getItem("video-analyzer-goals");
     if (savedGoals) setGoalRoot(JSON.parse(savedGoals));
 
@@ -971,7 +977,6 @@ export default function VideoAnalyzer() {
             <div className="bg-[#0b0b0f] border-b border-zinc-850 p-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <input type="text" placeholder="新しいフォルダ名" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCategory()} className="bg-zinc-900 text-xs text-white border border-zinc-800 rounded-xl px-3 py-1.5 focus:outline-none" />
-                {/* 🎨 背景色をシアンのすりガラス風に統一 */}
                 <button onClick={addCategory} className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20 text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1"><Plus size={12} className="stroke-[2.5]" />追加</button>
               </div>
               <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-850/40">
@@ -1046,7 +1051,6 @@ export default function VideoAnalyzer() {
                       </button>
                     </div>
                   ) : (
-                    /* 🛠️ フォルダ変更をバッジクリックで直接行えるようにプルダウン化 */
                     <div className="flex items-center gap-1.5">
                       <select
                         value={tab.category}
@@ -1054,7 +1058,7 @@ export default function VideoAnalyzer() {
                           const newCat = e.target.value;
                           setTabs((prev) => prev.map((t) => (t.id === tab.id ? { ...t, category: newCat } : t)));
                         }}
-                        onClick={(e) => e.stopPropagation()} // タブ切り替えが動かないようにブロック
+                        onClick={(e) => e.stopPropagation()} 
                         className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-950 rounded text-cyan-400 border border-zinc-800/80 font-mono uppercase focus:outline-none cursor-pointer appearance-none text-center hover:border-cyan-500/40 transition-all"
                       >
                         {categories.map((c) => (
@@ -1082,7 +1086,6 @@ export default function VideoAnalyzer() {
               ))}
               <button onClick={() => addNewTab()} className="p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 shrink-0"><Plus size={12} /></button>
             </div>
-            {/* 🎨 背景の「白いやつ」をシックなダークグレー＋境界線に変更しデータ系ボタンと統一 */}
             <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-700 text-xs font-bold px-3 py-1.5 rounded-xl whitespace-nowrap transition-all"><Upload size={12} />動画読込</button>
             <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="video/*" className="hidden" />
           </div>
@@ -1191,7 +1194,6 @@ export default function VideoAnalyzer() {
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-1.5">
                       <button onClick={() => stepFrame("backward", 1)} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
-                      {/* 🎨 再生ボタンを白背景から、テーマカラーのネオンシアンに統一 */}
                       <button onClick={togglePlay} className="p-2.5 rounded-lg bg-cyan-500 text-black font-bold shadow-md shadow-cyan-500/10 hover:bg-cyan-400 transition-all">{isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}</button>
                       <button onClick={() => stepFrame("forward", 1)} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsRight size={14} /></button>
                     </div>
