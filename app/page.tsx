@@ -113,7 +113,6 @@ const deleteVideoFromDB = async (id: string) => {
   });
 };
 
-// ✨ 【バグ修正の肝】キーボードが消えないようにコンポーネントを外へ追い出しました
 interface RenderGoalNodeProps {
   node: GoalNode;
   depth: number;
@@ -211,79 +210,47 @@ const RenderGoalNode = ({
 };
 
 export default function VideoAnalyzer() {
+  // 🌟 ハイドレーション＆上書きバグ防止用の読み込み完了フラグ
+  const [isLoaded, setIsLoaded] = useState(false);
+  
   const [view, setView] = useState<"home" | "analyzer" | "goals">("home");
 
-  const [goalRoot, setGoalRoot] = useState<GoalNode>(() => {
-    if (typeof window !== "undefined") {
-      const savedGoals = localStorage.getItem("video-analyzer-goals");
-      if (savedGoals) return JSON.parse(savedGoals);
-    }
-    return {
-      id: "root",
-      text: "ここに大目標を入力（例：〇〇のバトルで優勝する）",
-      completed: false,
-      isExpanded: true,
-      children: [
-        { id: "c-1", text: "スキル（例：フットワークのバリエーション）", completed: false, isExpanded: true, children: [] },
-        { id: "c-2", text: "フィジカル（例：体幹・ベンチプレス強化）", completed: false, isExpanded: true, children: [] },
-        { id: "c-3", text: "研究・バトル戦術", completed: false, isExpanded: true, children: [] }
-      ]
-    };
+  // 初期値は固定のデフォルト値に統一
+  const [goalRoot, setGoalRoot] = useState<GoalNode>({
+    id: "root",
+    text: "ここに大目標を入力（例：〇〇のバトルで優勝する）",
+    completed: false,
+    isExpanded: true,
+    children: [
+      { id: "c-1", text: "スキル（例：フットワークのバリエーション）", completed: false, isExpanded: true, children: [] },
+      { id: "c-2", text: "フィジカル（例：体幹・ベンチプレス強化）", completed: false, isExpanded: true, children: [] },
+      { id: "c-3", text: "研究・バトル戦術", completed: false, isExpanded: true, children: [] }
+    ]
   });
 
-  const [categories, setCategories] = useState<string[]>(() => {
-    if (typeof window !== "undefined") {
-      const savedCats = localStorage.getItem("video-analyzer-categories");
-      if (savedCats) return JSON.parse(savedCats);
-    }
-    return ["フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"];
-  });
+  const [categories, setCategories] = useState<string[]>(["フットワーク", "パワームーブ", "バトル", "ルーティン", "その他"]);
 
-  const [tabs, setTabs] = useState<VideoTab[]>(() => {
-    if (typeof window !== "undefined") {
-      const savedTabs = localStorage.getItem("video-analyzer-tabs");
-      if (savedTabs) {
-        const parsedTabs: VideoTab[] = JSON.parse(savedTabs);
-        return parsedTabs.map((tab) => ({
-          ...tab,
-          videoSrc: null,
-          category: tab.category || "その他",
-          loopStart: tab.loopStart !== undefined ? tab.loopStart : null,
-          loopEnd: tab.loopEnd !== undefined ? tab.loopEnd : null,
-          zoom: tab.zoom !== undefined ? tab.zoom : 1,
-          panX: tab.panX !== undefined ? tab.panX : 0,
-          panY: tab.panY !== undefined ? tab.panY : 0,
-          videoId: tab.videoId,
-        }));
-      }
-    }
-    return [
-      {
-        id: "tab-1",
-        name: "セッション 1",
-        videoSrc: null,
-        isMirrored: false,
-        rotation: 0,
-        showGrid: false,
-        playbackRate: 1,
-        notes: "",
-        category: "その他",
-        loopStart: null,
-        loopEnd: null,
-        zoom: 1,
-        panX: 0,
-        panY: 0,
-        videoId: undefined,
-      },
-    ];
-  });
+  const [tabs, setTabs] = useState<VideoTab[]>([
+    {
+      id: "tab-1",
+      name: "セッション 1",
+      videoSrc: null,
+      isMirrored: false,
+      rotation: 0,
+      showGrid: false,
+      playbackRate: 1,
+      notes: "",
+      category: "その他",
+      loopStart: null,
+      loopEnd: null,
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+      videoId: undefined,
+    },
+  ]);
 
-  const [activeTabId, setActiveTabId] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("video-analyzer-active-tab") || "tab-1";
-    }
-    return "tab-1";
-  });
+  const [activeTabId, setActiveTabId] = useState<string>("tab-1");
 
   const [compareMode, setCompareMode] = useState(false);
   const [compareTabId, setCompareTabId] = useState<string | null>(null);
@@ -315,28 +282,47 @@ export default function VideoAnalyzer() {
     (tab) => currentCategory === "すべて" || tab.category === currentCategory
   );
 
+  // 🌟 【修正】マウント時に一度だけ安全にlocalStorageとIndexedDBからデータを復元
   useEffect(() => {
-    localStorage.setItem("video-analyzer-categories", JSON.stringify(categories));
-  }, [categories]);
+    const savedGoals = localStorage.getItem("video-analyzer-goals");
+    if (savedGoals) setGoalRoot(JSON.parse(savedGoals));
 
-  useEffect(() => {
-    const safeTabs = tabs.map((tab) => ({ ...tab, videoSrc: null }));
-    localStorage.setItem("video-analyzer-tabs", JSON.stringify(safeTabs));
-  }, [tabs]);
+    const savedCats = localStorage.getItem("video-analyzer-categories");
+    if (savedCats) setCategories(JSON.parse(savedCats));
 
-  useEffect(() => {
-    localStorage.setItem("video-analyzer-active-tab", activeTabId);
-  }, [activeTabId]);
+    const savedActiveTab = localStorage.getItem("video-analyzer-active-tab");
+    if (savedActiveTab) setActiveTabId(savedActiveTab);
 
-  useEffect(() => {
-    localStorage.setItem("video-analyzer-goals", JSON.stringify(goalRoot));
-  }, [goalRoot]);
-
-  useEffect(() => {
     const restoreVideos = async () => {
       try {
+        const savedTabs = localStorage.getItem("video-analyzer-tabs");
+        let baseTabs: VideoTab[] = [];
+        if (savedTabs) {
+          baseTabs = JSON.parse(savedTabs);
+        } else {
+          baseTabs = [
+            {
+              id: "tab-1",
+              name: "セッション 1",
+              videoSrc: null,
+              isMirrored: false,
+              rotation: 0,
+              showGrid: false,
+              playbackRate: 1,
+              notes: "",
+              category: "その他",
+              loopStart: null,
+              loopEnd: null,
+              zoom: 1,
+              panX: 0,
+              panY: 0,
+              videoId: undefined,
+            }
+          ];
+        }
+
         const updatedTabs = await Promise.all(
-          tabs.map(async (tab) => {
+          baseTabs.map(async (tab) => {
             if (!tab.videoId) return tab;
             const file = await getVideoFromDB(tab.videoId);
             if (!file) return tab;
@@ -346,10 +332,35 @@ export default function VideoAnalyzer() {
         setTabs(updatedTabs);
       } catch (err) {
         console.error("動画復元失敗", err);
+      } finally {
+        // 全ての復元処理が終わってから「読み込み完了フラグ」をtrueにする
+        setIsLoaded(true);
       }
     };
     restoreVideos();
   }, []);
+
+  // 🌟 【修正】読み込みが完了（isLoaded === true）するまでは自動保存を発動させない
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("video-analyzer-categories", JSON.stringify(categories));
+  }, [categories, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    const safeTabs = tabs.map((tab) => ({ ...tab, videoSrc: null }));
+    localStorage.setItem("video-analyzer-tabs", JSON.stringify(safeTabs));
+  }, [tabs, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("video-analyzer-active-tab", activeTabId);
+  }, [activeTabId, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("video-analyzer-goals", JSON.stringify(goalRoot));
+  }, [goalRoot, isLoaded]);
 
   useEffect(() => {
     return () => {
@@ -358,6 +369,11 @@ export default function VideoAnalyzer() {
       });
     };
   }, []);
+
+  // 🌟 読み込みが終わる前の一瞬のチラつきや不完全な状態での挙動を防ぐ
+  if (!isLoaded) {
+    return <div className="min-h-screen bg-[#0b0b0f]" />;
+  }
 
   const updateTreeRecursively = (node: GoalNode, targetId: string, updater: (n: GoalNode) => Partial<GoalNode>): GoalNode => {
     if (node.id === targetId) {
@@ -900,7 +916,6 @@ export default function VideoAnalyzer() {
           </div>
 
           <div className="bg-[#0b0b0f]/60 border border-zinc-850 rounded-2xl p-2 md:p-4 min-h-[400px] overflow-x-auto">
-            {/* ✨ 追い出した子コンポーネントをProps付きで呼び出し */}
             <RenderGoalNode 
               node={goalRoot} 
               depth={0} 
