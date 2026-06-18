@@ -318,6 +318,9 @@ export default function VideoAnalyzer() {
   const [newCatName, setNewCatName] = useState("");
   const [showZoomPanel, setShowZoomPanel] = useState(false);
 
+  const [isDraggingMain, setIsDraggingMain] = useState(false);
+  const [isDraggingCompare, setIsDraggingCompare] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const compareFileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -326,6 +329,9 @@ export default function VideoAnalyzer() {
   // Keep ref in sync to avoid stale closures in cleanup
   const tabsRef = useRef(tabs);
   useEffect(() => { tabsRef.current = tabs; }, [tabs]);
+
+  const compareTabIdRef = useRef<string | null>(compareTabId);
+  useEffect(() => { compareTabIdRef.current = compareTabId; }, [compareTabId]);
 
   // ── Derived ──────────────────────────────────
   const activeTab = useMemo(() => tabs.find((t) => t.id === activeTabId) ?? tabs[0], [tabs, activeTabId]);
@@ -568,9 +574,61 @@ export default function VideoAnalyzer() {
   }, [activeTabId]);
 
   const handleCompareFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!compareTabId) return;
-    await handleFileChange(e, compareTabId);
-  }, [compareTabId, handleFileChange]);
+    const id = compareTabIdRef.current;
+    if (!id) return;
+    await handleFileChange(e, id);
+  }, [handleFileChange]);
+
+  // ── Drag & drop helpers ───────────────────────
+  const handleDropFile = useCallback(async (file: File, targetTabId: string) => {
+    if (!file.type.startsWith("video/")) return;
+    try {
+      const currentTab = tabsRef.current.find((t) => t.id === targetTabId);
+      if (currentTab?.videoSrc) URL.revokeObjectURL(currentTab.videoSrc);
+      const videoId = `video-${Date.now()}`;
+      await saveVideoToDB(videoId, file);
+      const objectUrl = URL.createObjectURL(file);
+      setTabs((prev) => prev.map((tab) =>
+        tab.id === targetTabId ? { ...tab, videoSrc: objectUrl, videoId, name: file.name.substring(0, 20) } : tab,
+      ));
+      setIsPlaying(false);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
+  const handleMainDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingMain(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) await handleDropFile(file, activeTabId);
+  }, [activeTabId, handleDropFile]);
+
+  const handleCompareDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingCompare(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    // 比較タブがなければ新規作成してから読み込む
+    if (!compareTabId) {
+      const newTab: VideoTab = {
+        ...makeDefaultTab(0),
+        id: `tab-${Date.now()}`,
+        name: file.name.substring(0, 20),
+        category: activeTab?.category ?? categories[0] ?? "その他",
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setCompareTabId(newTab.id);
+      setCompareMode(true);
+      // 少し待ってから保存（state反映後）
+      setTimeout(async () => {
+        await handleDropFile(file, newTab.id);
+      }, 50);
+    } else {
+      await handleDropFile(file, compareTabId);
+      setCompareMode(true);
+    }
+  }, [compareTabId, activeTab, categories, handleDropFile]);
 
   // ─────────────────────────────────────────────
   // Playback controls
@@ -1213,29 +1271,88 @@ export default function VideoAnalyzer() {
             <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800/50">
 
               {/* Video area */}
-              <div className={`relative flex flex-col md:flex-row items-center justify-center p-2 gap-2 bg-black ${compareMode && compareTab ? "" : "aspect-video"}`}>
+              <div className="relative flex flex-col md:flex-row items-stretch p-2 gap-2 bg-black">
 
                 {/* Main video */}
-                <div className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border border-zinc-900/80 w-full ${compareMode && compareTab ? "aspect-video md:w-1/2" : "h-full"}`}>
+                <div
+                  className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border aspect-video transition-all ${
+                    compareMode ? "w-full md:w-1/2" : "w-full"
+                  } ${isDraggingMain ? "border-cyan-400 ring-2 ring-cyan-400/30 bg-cyan-950/20" : "border-zinc-900/80"}`}
+                  onDragOver={(e) => { e.preventDefault(); setIsDraggingMain(true); }}
+                  onDragLeave={() => setIsDraggingMain(false)}
+                  onDrop={handleMainDrop}
+                >
                   {activeTab?.videoSrc ? (
                     <VideoPlayer vRef={videoRef} tab={activeTab} onTimeUpdate={handleTimeUpdate} />
                   ) : (
-                    <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center text-zinc-600 gap-2 cursor-pointer text-xs p-8">
-                      <Upload size={28} />動画を選択してください
+                    <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center text-zinc-600 gap-3 cursor-pointer text-xs p-8 w-full h-full justify-center select-none">
+                      <div className="border-2 border-dashed border-zinc-700 rounded-2xl p-8 flex flex-col items-center gap-2 hover:border-cyan-500/50 hover:text-zinc-400 transition-all w-full">
+                        <Upload size={24} className="text-zinc-500" />
+                        <span className="font-bold text-zinc-400">メイン動画</span>
+                        <span className="text-zinc-600">クリックまたはドロップ</span>
+                      </div>
                     </div>
                   )}
+                  {isDraggingMain && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-cyan-950/40 rounded-xl pointer-events-none z-30">
+                      <div className="text-cyan-300 font-black text-sm flex flex-col items-center gap-2">
+                        <Upload size={28} />ここにドロップ
+                      </div>
+                    </div>
+                  )}
+                  {compareMode && <div className="absolute bottom-2 left-2 text-[9px] font-mono text-zinc-500 bg-black/60 px-1.5 py-0.5 rounded border border-zinc-800">メイン</div>}
                 </div>
 
-                {/* Compare video */}
-                {compareMode && compareTab && (
-                  <div className="relative overflow-hidden flex items-center justify-center bg-black rounded-xl border border-zinc-800 w-full aspect-video md:w-1/2">
-                    {compareTab.videoSrc ? (
+                {/* Compare video — only shown when compareMode is ON */}
+                {compareMode && (
+                  <div
+                    className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border w-full aspect-video md:w-1/2 transition-all ${
+                      isDraggingCompare
+                        ? "border-violet-400 ring-2 ring-violet-400/30 bg-violet-950/20"
+                        : compareTab?.videoSrc ? "border-zinc-800" : "border-dashed border-zinc-700 hover:border-violet-500/50"
+                    }`}
+                    onDragOver={(e) => { e.preventDefault(); setIsDraggingCompare(true); }}
+                    onDragLeave={() => setIsDraggingCompare(false)}
+                    onDrop={handleCompareDrop}
+                  >
+                    {compareTab?.videoSrc ? (
                       <VideoPlayer vRef={compareVideoRef} tab={compareTab} controls={compareControls} isCompare onTimeUpdate={handleCompareTimeUpdate} />
                     ) : (
-                      <div onClick={() => compareFileInputRef.current?.click()} className="text-zinc-600 text-xs flex flex-col items-center gap-2 p-8 cursor-pointer">
-                        <Upload size={20} />比較動画を読込
+                      <div
+                        onClick={() => {
+                          if (!compareTabId) {
+                            const newTab: VideoTab = {
+                              ...makeDefaultTab(0),
+                              id: `tab-${Date.now()}`,
+                              name: `比較 ${tabs.length + 1}`,
+                              category: activeTab?.category ?? categories[0] ?? "その他",
+                            };
+                            setTabs((prev) => [...prev, newTab]);
+                            setCompareTabId(newTab.id);
+                            setTimeout(() => compareFileInputRef.current?.click(), 50);
+                          } else {
+                            compareFileInputRef.current?.click();
+                          }
+                        }}
+                        className="flex flex-col items-center justify-center gap-3 cursor-pointer text-xs p-8 w-full h-full select-none"
+                      >
+                        <div className="border-2 border-dashed border-zinc-700 rounded-2xl p-8 flex flex-col items-center gap-2 hover:border-violet-500/50 hover:text-zinc-400 transition-all w-full">
+                          <Upload size={24} className="text-zinc-500" />
+                          <span className="font-bold text-zinc-400">比較動画</span>
+                          <span className="text-zinc-600">クリックまたはドロップ</span>
+                        </div>
                       </div>
                     )}
+                    {isDraggingCompare && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-violet-950/40 rounded-xl pointer-events-none z-30">
+                        <div className="text-violet-300 font-black text-sm flex flex-col items-center gap-2">
+                          <Upload size={28} />比較動画をドロップ
+                        </div>
+                      </div>
+                    )}
+                    <div className="absolute bottom-2 right-2 text-[9px] font-mono text-zinc-500 bg-black/60 px-1.5 py-0.5 rounded border border-zinc-800">
+                      {compareTab?.videoSrc ? `比較: ${compareTab.name}` : "比較"}
+                    </div>
                   </div>
                 )}
               </div>
