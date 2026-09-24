@@ -131,9 +131,12 @@ const GridOverlay = () => (
   }} />
 );
 
-const formatTime = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const formatTime = (t: number) => {
+  if (isNaN(t) || t < 0) return "0:00";
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+};
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function VideoAnalyzer() {
   const [isLoaded, setIsLoaded] = useState(false);
@@ -225,7 +228,6 @@ export default function VideoAnalyzer() {
     })();
 
     return () => { tabsRef.current.forEach((t) => { if (t.videoSrc) URL.revokeObjectURL(t.videoSrc); }); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { if (isLoaded) localStorage.setItem("video-analyzer-categories", JSON.stringify(categories)); }, [categories, isLoaded]);
@@ -332,6 +334,19 @@ export default function VideoAnalyzer() {
     } else { await handleDropFile(file, compareTabId); setCompareMode(true); }
   }, [compareTabId, activeTab, categories, handleDropFile]);
 
+  // ── チラつき（flicker）防止 DragLeave ──
+  const handleMainDragLeave = useCallback((e: React.DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingMain(false);
+    }
+  }, []);
+
+  const handleCompareDragLeave = useCallback((e: React.DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingCompare(false);
+    }
+  }, []);
+
   // ─── Playback ─────────────────────────────────────────────────────────────────
 
   const togglePlay = useCallback(() => {
@@ -355,17 +370,18 @@ export default function VideoAnalyzer() {
     if (compareVideoRef.current) compareVideoRef.current.pause();
     setIsPlaying(false);
     const delta = ((direction === "forward" ? 1 : -1) * step) / 30;
-    const newTime = videoRef.current.currentTime + delta;
+    const newTime = Math.max(0, videoRef.current.currentTime + delta);
     videoRef.current.currentTime = newTime;
-    if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = newTime + compareControls.syncOffset;
+    setCurrentTime(newTime);
+    if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = Math.max(0, newTime + compareControls.syncOffset);
   }, [compareMode, syncPlay, compareControls.syncOffset]);
 
   const jumpToTime = useCallback((seconds: number) => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = seconds; setCurrentTime(seconds);
-    if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = seconds + compareControls.syncOffset;
+    if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = Math.max(0, seconds + compareControls.syncOffset);
     if (!isPlaying) {
-      videoRef.current.play();
+      videoRef.current.play().catch(() => {});
       if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.play().catch(() => {});
       setIsPlaying(true);
     }
@@ -374,9 +390,11 @@ export default function VideoAnalyzer() {
   const handleTimeUpdate = useCallback(() => {
     if (!videoRef.current) return;
     const time = videoRef.current.currentTime; setCurrentTime(time);
-    if (activeTab?.loopStart !== null && activeTab?.loopEnd !== null && time >= (activeTab.loopEnd ?? Infinity)) {
-      videoRef.current.currentTime = activeTab.loopStart ?? 0;
-      if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = (activeTab.loopStart ?? 0) + compareControls.syncOffset;
+    if (activeTab?.loopStart !== null && activeTab?.loopEnd !== null && activeTab.loopStart !== undefined && activeTab.loopEnd !== undefined) {
+      if (time >= activeTab.loopEnd) {
+        videoRef.current.currentTime = activeTab.loopStart;
+        if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = activeTab.loopStart + compareControls.syncOffset;
+      }
     }
   }, [activeTab, compareMode, syncPlay, compareControls.syncOffset]);
 
@@ -390,8 +408,15 @@ export default function VideoAnalyzer() {
   const setLoopPoint = useCallback((type: "start" | "end") => {
     if (!videoRef.current) return;
     const time = videoRef.current.currentTime;
-    if (type === "start") updateActiveTab({ loopStart: time });
-    else if (activeTab?.loopStart === null || time > (activeTab?.loopStart ?? 0)) updateActiveTab({ loopEnd: time });
+    if (type === "start") {
+      updateActiveTab({ loopStart: time });
+    } else if (type === "end") {
+      if (activeTab?.loopStart === null || activeTab?.loopStart === undefined || time > activeTab.loopStart) {
+        updateActiveTab({ loopEnd: time });
+      } else {
+        alert("B点（終了）はA点（開始）より後ろの時間に設定してください");
+      }
+    }
   }, [activeTab, updateActiveTab]);
 
   const clearLoop = useCallback(() => updateActiveTab({ loopStart: null, loopEnd: null }), [updateActiveTab]);
@@ -542,15 +567,22 @@ export default function VideoAnalyzer() {
     };
   }, []);
 
-  // ─── FFmpeg トリミング ────────────────────────────────────────────────────────
+  // ─── FFmpeg トリミング（動的インポート修正版） ─────────────────────────────
 
   const loadFFmpeg = useCallback(async () => {
     if (ffmpegLoadedRef.current) return ffmpegRef.current;
     setTrimStatus("loading");
     try {
-      // @ffmpeg/ffmpeg を CDN から動的ロード（Next.js環境ではnpmでインストール推奨）
-      const { FFmpeg } = await import("https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js" as any);
-      const { fetchFile, toBlobURL } = await import("https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js" as any);
+      // Next.js (Webpack) 向けの動的インポート構文修正
+      const ffmpegModule = await import(
+        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js" as string
+      ) as any;
+      const utilModule = await import(
+        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js" as string
+      ) as any;
+
+      const { FFmpeg } = ffmpegModule;
+      const { fetchFile, toBlobURL } = utilModule;
 
       const ffmpeg = new FFmpeg();
       const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm";
@@ -563,7 +595,7 @@ export default function VideoAnalyzer() {
       ffmpegLoadedRef.current = true;
       return ffmpegRef.current;
     } catch (e) {
-      console.error(e);
+      console.error("FFmpeg Load Error:", e);
       setTrimStatus("error");
       return null;
     }
@@ -596,13 +628,13 @@ export default function VideoAnalyzer() {
 
       await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
-      // トリミング実行（再エンコードなしで高速）
-      const duration = end - start;
+      // トリミング実行（再エンコードなしで高速切り出し）
+      const trimDuration = end - start;
       await ffmpeg.exec([
         "-ss", String(start),
         "-i", inputName,
-        "-t", String(duration),
-        "-c", "copy",          // 再エンコードなし → 爆速
+        "-t", String(trimDuration),
+        "-c", "copy",
         "-movflags", "+faststart",
         outputName,
       ]);
@@ -636,7 +668,7 @@ export default function VideoAnalyzer() {
       setTrimStatus("done");
       setTimeout(() => setTrimStatus("idle"), 2000);
     } catch (e) {
-      console.error(e);
+      console.error("Trimming error:", e);
       setTrimStatus("error");
       setTimeout(() => setTrimStatus("idle"), 3000);
     }
@@ -648,7 +680,7 @@ export default function VideoAnalyzer() {
     if (!blob) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${tab.name}${tab.name.toLowerCase().endsWith(".webm") ? "" : ".webm"}`;
+    a.download = `${tab.name}${tab.name.toLowerCase().endsWith(".webm") || tab.name.toLowerCase().endsWith(".mp4") ? "" : ".webm"}`;
     a.click();
   }, []);
 
@@ -729,7 +761,7 @@ export default function VideoAnalyzer() {
 
   if (!isLoaded) return <div className="min-h-screen bg-[#0b0b0f]" />;
 
-  // ─── VideoPlayer ──────────────────────────────────────────────────────────────
+  // ─── VideoPlayer Subcomponent ──────────────────────────────────────────────────
 
   const VideoPlayer = ({ vRef, tab, controls, isCompare = false, onTimeUpdate }: {
     vRef: React.RefObject<HTMLVideoElement | null>; tab: VideoTab; controls?: CompareControls;
@@ -773,12 +805,12 @@ export default function VideoAnalyzer() {
     );
   };
 
-  // ─── JSX ──────────────────────────────────────────────────────────────────────
+  // ─── JSX Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-[#0b0b0f] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
 
-      {/* ── Nav ── */}
+      {/* ── Header Navigation ── */}
       <div className="w-full max-w-6xl mb-4 flex items-center justify-between bg-[#121218] border border-zinc-800/50 px-4 py-3 rounded-2xl shadow-lg">
         <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView("home")}>
           <div className="bg-gradient-to-tr from-cyan-500 to-blue-600 p-2 rounded-xl text-black shadow-md shadow-cyan-500/20"><Tv size={16} className="stroke-[2.5]" /></div>
@@ -795,7 +827,7 @@ export default function VideoAnalyzer() {
         </div>
       </div>
 
-      {/* ══ HOME ══ */}
+      {/* ══ HOME VIEW ══ */}
       {view === "home" && (
         <div className="w-full max-w-6xl space-y-6 animate-fadeIn">
           <div className="relative bg-gradient-to-r from-[#121218] to-[#191924] border border-zinc-800/50 rounded-3xl p-6 md:p-8 overflow-hidden shadow-xl">
@@ -906,7 +938,7 @@ export default function VideoAnalyzer() {
         </div>
       )}
 
-      {/* ══ GOALS ══ */}
+      {/* ══ GOALS VIEW ══ */}
       {view === "goals" && (
         <div className="w-full max-w-4xl bg-[#121218] border border-zinc-800/50 rounded-2xl shadow-2xl p-4 md:p-6 space-y-4 animate-fadeIn">
           <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
@@ -929,7 +961,7 @@ export default function VideoAnalyzer() {
         </div>
       )}
 
-      {/* ══ ANALYZER ══ */}
+      {/* ══ ANALYZER VIEW ══ */}
       {view === "analyzer" && (
         <div className="w-full max-w-6xl bg-[#121218] border border-zinc-800/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn">
 
@@ -945,7 +977,7 @@ export default function VideoAnalyzer() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 self-end md:self-auto flex-wrap">
-              {/* 📼 クリップパネルボタン */}
+              {/* クリップパネルボタン */}
               <button onClick={() => setShowClipsPanel(!showClipsPanel)}
                 className={`p-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${showClipsPanel ? "bg-red-500/20 border-red-500/40 text-red-400" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"}`}>
                 <Film size={12} /><span>クリップ {clipTabs.length > 0 ? `(${clipTabs.length})` : ""}</span>
@@ -966,13 +998,22 @@ export default function VideoAnalyzer() {
           {/* クリップパネル */}
           {showClipsPanel && (
             <div className="bg-[#0b0b0f] border-b border-zinc-800/50 p-3 space-y-2">
-              <div className="flex items-center gap-2 mb-2">
-                <Film size={13} className="text-red-400" />
-                <span className="text-xs font-bold text-red-400 uppercase tracking-wider">録画クリップ</span>
-                <span className="text-[10px] text-zinc-500">アプリ内に保存済み</span>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Film size={13} className="text-red-400" />
+                  <span className="text-xs font-bold text-red-400 uppercase tracking-wider">録画 / カットクリップ</span>
+                  <span className="text-[10px] text-zinc-500">（アプリ内に保存済み）</span>
+                </div>
+                {activeTab?.loopStart !== null && activeTab?.loopEnd !== null && (
+                  <button onClick={trimAndSaveClip} disabled={trimStatus === "loading" || trimStatus === "trimming"}
+                    className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 text-black text-xs font-black px-3 py-1 rounded-lg transition-all flex items-center gap-1 shadow-sm">
+                    {trimStatus === "trimming" ? <RefreshCw size={12} className="animate-spin" /> : <Film size={12} />}
+                    <span>{trimStatus === "trimming" ? "切り出し中..." : "AB区間を高速切り出し"}</span>
+                  </button>
+                )}
               </div>
               {clipTabs.length === 0 ? (
-                <p className="text-xs text-zinc-600 py-2">録画クリップがありません。再生中に「⏺」ボタンで録画できます。</p>
+                <p className="text-xs text-zinc-600 py-2">録画クリップがありません。再生中に「⏺」で録画するか、AB点を指定して切り出しを行ってください。</p>
               ) : (
                 <div className="flex flex-wrap gap-2">
                   {clipTabs.map((tab) => (
@@ -1064,13 +1105,13 @@ export default function VideoAnalyzer() {
           <div className="flex flex-col lg:flex-row border-b border-zinc-800/50">
             <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800/50">
 
-              {/* 動画エリア */}
+              {/* 動画表示領域 */}
               <div className="relative flex flex-col md:flex-row items-stretch p-2 gap-2 bg-black">
                 {/* メイン動画 */}
                 <div
                   className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border aspect-video transition-all ${compareMode ? "w-full md:w-1/2" : "w-full"} ${isDraggingMain ? "border-cyan-400 ring-2 ring-cyan-400/30 bg-cyan-950/20" : "border-zinc-900/80"}`}
                   onDragOver={(e) => { e.preventDefault(); setIsDraggingMain(true); }}
-                  onDragLeave={() => setIsDraggingMain(false)}
+                  onDragLeave={handleMainDragLeave}
                   onDrop={handleMainDrop}
                 >
                   {activeTab?.videoSrc ? (
@@ -1086,7 +1127,7 @@ export default function VideoAnalyzer() {
                   )}
                   {isDraggingMain && <div className="absolute inset-0 flex items-center justify-center bg-cyan-950/40 rounded-xl pointer-events-none z-30"><div className="text-cyan-300 font-black text-sm flex flex-col items-center gap-2"><Upload size={28} />ここにドロップ</div></div>}
                   {compareMode && <div className="absolute bottom-2 left-2 text-[9px] font-mono text-zinc-500 bg-black/60 px-1.5 py-0.5 rounded border border-zinc-800">メイン</div>}
-                  {/* 録画中バッジ */}
+                  {/* 録画中表示 */}
                   {isRecording && (
                     <div className="absolute top-2 right-2 z-30 flex items-center gap-1.5 bg-black/80 backdrop-blur-sm border border-red-500/50 px-2.5 py-1 rounded-lg">
                       <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
@@ -1102,7 +1143,7 @@ export default function VideoAnalyzer() {
                   <div
                     className={`relative overflow-hidden flex items-center justify-center bg-black rounded-xl border w-full aspect-video md:w-1/2 transition-all ${isDraggingCompare ? "border-violet-400 ring-2 ring-violet-400/30 bg-violet-950/20" : compareTab?.videoSrc ? "border-zinc-800" : "border-dashed border-zinc-700 hover:border-violet-500/50"}`}
                     onDragOver={(e) => { e.preventDefault(); setIsDraggingCompare(true); }}
-                    onDragLeave={() => setIsDraggingCompare(false)}
+                    onDragLeave={handleCompareDragLeave}
                     onDrop={handleCompareDrop}
                   >
                     {compareTab?.videoSrc ? (
@@ -1137,13 +1178,18 @@ export default function VideoAnalyzer() {
                       {activeTab.loopStart !== null && duration > 0 && <div className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopStart / duration) * 100}%` }} />}
                       {activeTab.loopEnd !== null && duration > 0 && <div className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10" style={{ left: `${(activeTab.loopEnd / duration) * 100}%` }} />}
                       <input type="range" min={0} max={duration || 100} step={0.01} value={currentTime}
-                        onChange={(e) => { const v = parseFloat(e.target.value); if (videoRef.current) videoRef.current.currentTime = v; if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = v + compareControls.syncOffset; }}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          setCurrentTime(v);
+                          if (videoRef.current) videoRef.current.currentTime = v;
+                          if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = Math.max(0, v + compareControls.syncOffset);
+                        }}
                         className="w-full accent-white bg-transparent h-6 appearance-none cursor-pointer relative z-20 focus:outline-none" />
                     </div>
                     <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">{formatTime(duration)}</span>
                   </div>
 
-                  {/* 比較モード */}
+                  {/* 比較モードトグル */}
                   <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80 flex flex-wrap items-center gap-2 text-xs">
                     <button onClick={() => { setCompareMode(!compareMode); if (!compareTabId && tabs.length > 1) { const o = tabs.find((t) => t.id !== activeTabId); if (o) setCompareTabId(o.id); } }}
                       className={`px-3 py-1.5 rounded-lg font-bold transition-all border ${compareMode ? "bg-cyan-500 text-black border-cyan-400 shadow-sm" : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200"}`}>
@@ -1161,7 +1207,7 @@ export default function VideoAnalyzer() {
                     )}
                   </div>
 
-                  {/* 比較側コントロール */}
+                  {/* 比較側コントロールパネル */}
                   {compareMode && showComparePanel && compareTab && (
                     <div className="bg-[#0b0b0f]/80 border border-violet-500/20 rounded-2xl p-3 space-y-3 animate-fadeIn">
                       <div className="flex items-center justify-between">
@@ -1214,14 +1260,14 @@ export default function VideoAnalyzer() {
                     </div>
                   )}
 
-                  {/* 再生コントロール */}
+                  {/* 再生ボタン類 */}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-1.5">
-                      <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsLeft size={14} /></button>
+                      <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all"><ChevronsLeft size={14} /></button>
                       <button onClick={togglePlay} className="p-2.5 rounded-lg bg-cyan-500 text-black font-bold shadow-md shadow-cyan-500/10 hover:bg-cyan-400 transition-all">
                         {isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}
                       </button>
-                      <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300"><ChevronsRight size={14} /></button>
+                      <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all"><ChevronsRight size={14} /></button>
 
                       {/* ⏺ 録画ボタン */}
                       <button
