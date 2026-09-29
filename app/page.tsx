@@ -22,7 +22,7 @@ interface VideoTab {
   playbackRate: number; notes: string; category: string;
   loopStart: number | null; loopEnd: number | null;
   zoom: number; panX: number; panY: number; videoId?: string;
-  isClip?: boolean; // 録画クリップか否か
+  isClip?: boolean;
 }
 
 interface CompareControls {
@@ -74,7 +74,20 @@ const deleteVideoFromDB = async (id: string): Promise<void> => {
   });
 };
 
-// ─── Goal Node ────────────────────────────────────────────────────────────────
+// ─── Subcomponents ────────────────────────────────────────────────────────────
+
+const GridOverlay = React.memo(() => (
+  <div className="absolute inset-0 pointer-events-none z-10" style={{
+    backgroundImage: "linear-gradient(rgba(255,255,255,0.25) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.25) 1px,transparent 1px)",
+    backgroundSize: "33.33% 33.33%",
+  }} />
+));
+GridOverlay.displayName = "GridOverlay";
+
+const formatTime = (t: number) => {
+  if (isNaN(t) || t < 0) return "0:00";
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+};
 
 const RenderGoalNode = React.memo(({
   node, depth = 0, onToggleExpand, onToggleComplete, onUpdateText, onAddChild, onDelete,
@@ -114,6 +127,57 @@ const RenderGoalNode = React.memo(({
 });
 RenderGoalNode.displayName = "RenderGoalNode";
 
+const VideoPlayer = React.memo(({
+  vRef, tab, controls, isCompare = false, onTimeUpdate, compareMode, compareTab,
+  setIsPlaying, setDuration, setCompareDuration, togglePlay, syncPlay
+}: {
+  vRef: React.RefObject<HTMLVideoElement | null>; tab: VideoTab; controls?: CompareControls;
+  isCompare?: boolean; onTimeUpdate?: () => void; compareMode: boolean; compareTab?: VideoTab;
+  setIsPlaying: React.Dispatch<React.SetStateAction<boolean>>;
+  setDuration: React.Dispatch<React.SetStateAction<number>>;
+  setCompareDuration: React.Dispatch<React.SetStateAction<number>>;
+  togglePlay: () => void; syncPlay: boolean;
+}) => {
+  const mirror = isCompare ? (controls?.isMirrored ?? false) : tab.isMirrored;
+  const rot = isCompare ? (controls?.rotation ?? 0) : tab.rotation;
+  const grid = isCompare ? (controls?.showGrid ?? false) : tab.showGrid;
+  const zoom = isCompare ? (controls?.zoom ?? 1) : tab.zoom;
+  const px = isCompare ? (controls?.panX ?? 0) : tab.panX;
+  const py = isCompare ? (controls?.panY ?? 0) : tab.panY;
+  const ls = isCompare ? (controls?.loopStart ?? null) : tab.loopStart;
+  const le = isCompare ? (controls?.loopEnd ?? null) : tab.loopEnd;
+
+  return (
+    <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
+      <div className="w-full h-full flex items-center justify-center transition-all duration-150 ease-out" style={{ transform: `translate(${px}px,${py}px) scale(${zoom})`, transformOrigin: "center center" }}>
+        <div className="w-full h-full flex items-center justify-center" style={{ transform: `rotate(${rot}deg)` }}>
+          <video ref={vRef as React.RefObject<HTMLVideoElement>} src={tab.videoSrc ?? ""} playsInline
+            className={`w-full h-full object-contain ${mirror ? "scale-x-[-1]" : ""}`}
+            onPlay={() => !isCompare && setIsPlaying(true)}
+            onPause={() => !isCompare && setIsPlaying(false)}
+            onTimeUpdate={onTimeUpdate}
+            onLoadedMetadata={() => { if (vRef.current) { isCompare ? setCompareDuration(vRef.current.duration) : setDuration(vRef.current.duration); } }}
+            onClick={() => { if (!isCompare || !syncPlay) togglePlay(); }}
+          />
+          {grid && <GridOverlay />}
+        </div>
+      </div>
+      {(ls !== null || le !== null) && (
+        <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-cyan-400 z-20 flex items-center gap-1.5 border border-cyan-500/30">
+          <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
+          LOOP: {ls !== null ? formatTime(ls) : "--:--"} → {le !== null ? formatTime(le) : "--:--"}
+        </div>
+      )}
+      {compareMode && compareTab && (
+        <div className={`absolute bottom-2 ${isCompare ? "right-2" : "left-2"} bg-black/70 backdrop-blur-sm px-2 py-0.5 rounded text-[9px] font-mono text-zinc-400 border border-zinc-800`}>
+          {isCompare ? `比較: ${tab.name}` : `メイン: ${tab.name}`}
+        </div>
+      )}
+    </div>
+  );
+});
+VideoPlayer.displayName = "VideoPlayer";
+
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_CC: CompareControls = { isMirrored: false, rotation: 0, showGrid: false, playbackRate: 1, zoom: 1, panX: 0, panY: 0, loopStart: null, loopEnd: null, syncOffset: 0 };
@@ -124,18 +188,6 @@ const makeDefaultTab = (index: number): VideoTab => ({
   category: "その他", loopStart: null, loopEnd: null, zoom: 1, panX: 0, panY: 0,
 });
 
-const GridOverlay = () => (
-  <div className="absolute inset-0 pointer-events-none z-10" style={{
-    backgroundImage: "linear-gradient(rgba(255,255,255,0.25) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.25) 1px,transparent 1px)",
-    backgroundSize: "33.33% 33.33%",
-  }} />
-);
-
-const formatTime = (t: number) => {
-  if (isNaN(t) || t < 0) return "0:00";
-  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
-};
-
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function VideoAnalyzer() {
@@ -143,11 +195,11 @@ export default function VideoAnalyzer() {
   const [view, setView] = useState<"home" | "analyzer" | "goals">("home");
 
   const [goalRoot, setGoalRoot] = useState<GoalNode>({
-    id: "root", text: "ここに大目標を入力（例：〇〇のバトルで優勝する）", completed: false, isExpanded: true,
+    id: "root", text: "ここに大目標を入力（例：次のバトルでベスト4に入る）", completed: false, isExpanded: true,
     children: [
-      { id: "c-1", text: "スキル（例：フットワークのバリエーション）", completed: false, isExpanded: true, children: [] },
-      { id: "c-2", text: "フィジカル（例：体幹・ベンチプレス強化）", completed: false, isExpanded: true, children: [] },
-      { id: "c-3", text: "研究・バトル戦術", completed: false, isExpanded: true, children: [] },
+      { id: "c-1", text: "スキル（例：フットワークのバリエーション増加）", completed: false, isExpanded: true, children: [] },
+      { id: "c-2", text: "フィジカル（例：パワームーブ用の体幹・軸の安定）", completed: false, isExpanded: true, children: [] },
+      { id: "c-3", text: "戦術・研究（例：音ハメの引き出し・相手の研究）", completed: false, isExpanded: true, children: [] },
     ],
   });
 
@@ -191,6 +243,7 @@ export default function VideoAnalyzer() {
   const compareFileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const compareVideoRef = useRef<HTMLVideoElement>(null);
+  
   const tabsRef = useRef(tabs);
   useEffect(() => { tabsRef.current = tabs; }, [tabs]);
   const compareTabIdRef = useRef<string | null>(compareTabId);
@@ -236,7 +289,7 @@ export default function VideoAnalyzer() {
   useEffect(() => { if (isLoaded) localStorage.setItem("video-analyzer-goals", JSON.stringify(goalRoot)); }, [goalRoot, isLoaded]);
   useEffect(() => { if (isLoaded) localStorage.setItem("video-analyzer-compare-controls", JSON.stringify(compareControls)); }, [compareControls, isLoaded]);
 
-  useEffect(() => { if (videoRef.current) videoRef.current.playbackRate = activeTab?.playbackRate ?? 1; }, [activeTabId, activeTab?.playbackRate, activeTab?.videoSrc, view]);
+  useEffect(() => { if (videoRef.current) videoRef.current.playbackRate = activeTab?.playbackRate ?? 1; }, [activeTab?.playbackRate, activeTab?.videoSrc, view]);
   useEffect(() => { if (compareMode && compareVideoRef.current) compareVideoRef.current.playbackRate = compareControls.playbackRate; }, [compareMode, compareControls.playbackRate, compareTabId]);
   useEffect(() => { setIsPlaying(false); }, [activeTabId, view]);
 
@@ -334,17 +387,12 @@ export default function VideoAnalyzer() {
     } else { await handleDropFile(file, compareTabId); setCompareMode(true); }
   }, [compareTabId, activeTab, categories, handleDropFile]);
 
-  // ── チラつき（flicker）防止 DragLeave ──
   const handleMainDragLeave = useCallback((e: React.DragEvent) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setIsDraggingMain(false);
-    }
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDraggingMain(false);
   }, []);
 
   const handleCompareDragLeave = useCallback((e: React.DragEvent) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-      setIsDraggingCompare(false);
-    }
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDraggingCompare(false);
   }, []);
 
   // ─── Playback ─────────────────────────────────────────────────────────────────
@@ -375,6 +423,27 @@ export default function VideoAnalyzer() {
     setCurrentTime(newTime);
     if (compareMode && syncPlay && compareVideoRef.current) compareVideoRef.current.currentTime = Math.max(0, newTime + compareControls.syncOffset);
   }, [compareMode, syncPlay, compareControls.syncOffset]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (view !== "analyzer") return;
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        stepFrame("forward");
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        stepFrame("backward");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [togglePlay, stepFrame, view]);
 
   const jumpToTime = useCallback((seconds: number) => {
     if (!videoRef.current) return;
@@ -440,95 +509,50 @@ export default function VideoAnalyzer() {
 
   const startRecording = useCallback(() => {
     if (isRecording) return;
-
     const video = videoRef.current;
-    if (!video) {
-      alert("動画を先に読み込んでください");
-      return;
-    }
+    if (!video) { alert("動画を先に読み込んでください"); return; }
 
-    const captureStream = (video as HTMLVideoElement & {
-      captureStream?: () => MediaStream;
-      mozCaptureStream?: () => MediaStream;
-    }).captureStream ?? (video as HTMLVideoElement & {
-      captureStream?: () => MediaStream;
-      mozCaptureStream?: () => MediaStream;
-    }).mozCaptureStream;
-
-    if (!captureStream) {
-      alert("このブラウザは動画録画に対応していません。Chrome / Edgeで試してください。");
-      return;
-    }
+    const captureStream = (video as any).captureStream ?? (video as any).mozCaptureStream;
+    if (!captureStream) { alert("このブラウザは動画録画に対応していません。Chrome / Edgeで試してください。"); return; }
 
     try {
       const stream = captureStream.call(video);
-      const mimeTypes = [
-        "video/webm;codecs=vp9,opus",
-        "video/webm;codecs=vp8,opus",
-        "video/webm",
-      ];
+      const mimeTypes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
       const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
 
-      if (!mimeType) {
-        alert("このブラウザで録画できる動画形式が見つかりません。Chrome / Edgeで試してください。");
-        return;
-      }
+      if (!mimeType) { alert("このブラウザで録画できる動画形式が見つかりません。"); return; }
 
       const recorder = new MediaRecorder(stream, { mimeType });
       recordingChunksRef.current = [];
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
-      };
-
+      recorder.ondataavailable = (event) => { if (event.data.size > 0) recordingChunksRef.current.push(event.data); };
       recorder.onerror = (event) => {
         console.error("MediaRecorder error:", event);
-        if (recordingTimerRef.current !== null) {
-          window.clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-        setIsRecording(false);
-        setRecordingTime(0);
-        mediaRecorderRef.current = null;
+        if (recordingTimerRef.current !== null) { window.clearInterval(recordingTimerRef.current); recordingTimerRef.current = null; }
+        setIsRecording(false); setRecordingTime(0); mediaRecorderRef.current = null;
         alert("録画中にエラーが発生しました。");
       };
 
       recorder.onstop = async () => {
-        if (recordingTimerRef.current !== null) {
-          window.clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-
-        setIsRecording(false);
-        setRecordingTime(0);
-        mediaRecorderRef.current = null;
+        if (recordingTimerRef.current !== null) { window.clearInterval(recordingTimerRef.current); recordingTimerRef.current = null; }
+        setIsRecording(false); setRecordingTime(0); mediaRecorderRef.current = null;
 
         const chunks = recordingChunksRef.current;
         recordingChunksRef.current = [];
-
         if (!chunks.length) return;
 
         try {
           const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
           const clipId = `recording-${Date.now()}`;
           const clipTabId = `tab-${Date.now()}-recording`;
-          const clipName = `録画 ${new Date().toLocaleTimeString("ja-JP", {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })}`;
+          const clipName = `録画 ${new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
 
           await saveVideoToDB(clipId, blob);
           const src = URL.createObjectURL(blob);
 
           const clipTab: VideoTab = {
-            ...makeDefaultTab(0),
-            id: clipTabId,
-            name: clipName,
-            videoSrc: src,
-            videoId: clipId,
-            category: activeTab?.category ?? categories[0] ?? "その他",
-            isClip: true,
+            ...makeDefaultTab(0), id: clipTabId, name: clipName, videoSrc: src, videoId: clipId,
+            category: activeTab?.category ?? categories[0] ?? "その他", isClip: true,
           };
 
           setTabs((prev) => [...prev, clipTab]);
@@ -546,40 +570,24 @@ export default function VideoAnalyzer() {
       setRecordingTime(0);
       setIsRecording(true);
 
-      recordingTimerRef.current = window.setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
-      }, 1000);
-    } catch (error) {
-      console.error("録画開始エラー:", error);
-      alert("録画を開始できませんでした。Chrome / Edgeで試してください。");
-    }
+      recordingTimerRef.current = window.setInterval(() => { setRecordingTime((prev) => prev + 1); }, 1000);
+    } catch (error) { console.error("録画開始エラー:", error); alert("録画を開始できませんでした。"); }
   }, [isRecording, activeTab, categories]);
 
   useEffect(() => {
     return () => {
-      if (recordingTimerRef.current !== null) {
-        window.clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        mediaRecorderRef.current.stop();
-      }
+      if (recordingTimerRef.current !== null) { window.clearInterval(recordingTimerRef.current); recordingTimerRef.current = null; }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
     };
   }, []);
 
-  // ─── FFmpeg トリミング（動的インポート修正版） ─────────────────────────────
-
+  // ─── FFmpeg トリミング ─────────────────────────────
   const loadFFmpeg = useCallback(async () => {
     if (ffmpegLoadedRef.current) return ffmpegRef.current;
     setTrimStatus("loading");
     try {
-      // Next.js (Webpack) 向けの動的インポート構文修正
-      const ffmpegModule = await import(
-        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js" as string
-      ) as any;
-      const utilModule = await import(
-        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js" as string
-      ) as any;
+      const ffmpegModule = await import(/* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js" as string) as any;
+      const utilModule = await import(/* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js" as string) as any;
 
       const { FFmpeg } = ffmpegModule;
       const { fetchFile, toBlobURL } = utilModule;
@@ -605,10 +613,7 @@ export default function VideoAnalyzer() {
     if (!activeTab?.videoId) { alert("動画がありません"); return; }
     const start = activeTab.loopStart;
     const end = activeTab.loopEnd;
-    if (start === null || end === null) {
-      alert("A点・B点を先に設定してください");
-      return;
-    }
+    if (start === null || end === null) { alert("A点・B点を先に設定してください"); return; }
 
     try {
       const loaded = await loadFFmpeg();
@@ -617,18 +622,15 @@ export default function VideoAnalyzer() {
 
       setTrimStatus("trimming");
 
-      // 元ファイルを取得
       const sourceBlob = await getVideoFromDB(activeTab.videoId);
       if (!sourceBlob) { setTrimStatus("error"); return; }
 
-      // 入力ファイルを書き込み
       const ext = activeTab.name.match(/\.[^.]+$/)?.at(0) ?? ".mp4";
       const inputName = `input${ext}`;
       const outputName = "output.mp4";
 
       await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
-      // トリミング実行（再エンコードなしで高速切り出し）
       const trimDuration = end - start;
       await ffmpeg.exec([
         "-ss", String(start),
@@ -642,24 +644,17 @@ export default function VideoAnalyzer() {
       const data = await ffmpeg.readFile(outputName);
       const blob = new Blob([data], { type: "video/mp4" });
 
-      // クリーンアップ
       await ffmpeg.deleteFile(inputName);
       await ffmpeg.deleteFile(outputName);
 
-      // アプリ内に保存
       const clipId = `clip-${Date.now()}`;
       const clipName = `クリップ ${formatTime(start)}〜${formatTime(end)}`;
       await saveVideoToDB(clipId, blob);
       const src = URL.createObjectURL(blob);
 
       const clipTab: VideoTab = {
-        ...makeDefaultTab(0),
-        id: `tab-${Date.now()}`,
-        name: clipName,
-        videoSrc: src,
-        videoId: clipId,
-        category: activeTab.category,
-        isClip: true,
+        ...makeDefaultTab(0), id: `tab-${Date.now()}`, name: clipName, videoSrc: src, videoId: clipId,
+        category: activeTab.category, isClip: true,
       };
 
       setTabs((prev) => [...prev, clipTab]);
@@ -761,55 +756,10 @@ export default function VideoAnalyzer() {
 
   if (!isLoaded) return <div className="min-h-screen bg-[#0b0b0f]" />;
 
-  // ─── VideoPlayer Subcomponent ──────────────────────────────────────────────────
-
-  const VideoPlayer = ({ vRef, tab, controls, isCompare = false, onTimeUpdate }: {
-    vRef: React.RefObject<HTMLVideoElement | null>; tab: VideoTab; controls?: CompareControls;
-    isCompare?: boolean; onTimeUpdate?: () => void;
-  }) => {
-    const mirror = isCompare ? (controls?.isMirrored ?? false) : tab.isMirrored;
-    const rot = isCompare ? (controls?.rotation ?? 0) : tab.rotation;
-    const grid = isCompare ? (controls?.showGrid ?? false) : tab.showGrid;
-    const zoom = isCompare ? (controls?.zoom ?? 1) : tab.zoom;
-    const px = isCompare ? (controls?.panX ?? 0) : tab.panX;
-    const py = isCompare ? (controls?.panY ?? 0) : tab.panY;
-    const ls = isCompare ? (controls?.loopStart ?? null) : tab.loopStart;
-    const le = isCompare ? (controls?.loopEnd ?? null) : tab.loopEnd;
-    return (
-      <div className="w-full h-full relative overflow-hidden flex items-center justify-center">
-        <div className="w-full h-full flex items-center justify-center transition-all duration-150 ease-out" style={{ transform: `translate(${px}px,${py}px) scale(${zoom})`, transformOrigin: "center center" }}>
-          <div className="w-full h-full flex items-center justify-center" style={{ transform: `rotate(${rot}deg)` }}>
-            <video ref={vRef as React.RefObject<HTMLVideoElement>} key={tab.id + (isCompare ? "-c" : "")} src={tab.videoSrc ?? ""} playsInline
-              className={`w-full h-full object-contain ${mirror ? "scale-x-[-1]" : ""}`}
-              onPlay={() => !isCompare && setIsPlaying(true)}
-              onPause={() => !isCompare && setIsPlaying(false)}
-              onTimeUpdate={onTimeUpdate}
-              onLoadedMetadata={() => { if (vRef.current) { isCompare ? setCompareDuration(vRef.current.duration) : setDuration(vRef.current.duration); } }}
-              onClick={() => { if (!isCompare || !syncPlay) togglePlay(); }}
-            />
-            {grid && <GridOverlay />}
-          </div>
-        </div>
-        {(ls !== null || le !== null) && (
-          <div className="absolute top-2 left-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg text-[10px] font-mono text-cyan-400 z-20 flex items-center gap-1.5 border border-cyan-500/30">
-            <RefreshCw size={10} className="animate-spin" style={{ animationDuration: "3s" }} />
-            LOOP: {ls !== null ? formatTime(ls) : "--:--"} → {le !== null ? formatTime(le) : "--:--"}
-          </div>
-        )}
-        {compareMode && compareTab && (
-          <div className={`absolute bottom-2 ${isCompare ? "right-2" : "left-2"} bg-black/70 backdrop-blur-sm px-2 py-0.5 rounded text-[9px] font-mono text-zinc-400 border border-zinc-800`}>
-            {isCompare ? `比較: ${tab.name}` : `メイン: ${tab.name}`}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   // ─── JSX Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-[#0b0b0f] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
-
       {/* ── Header Navigation ── */}
       <div className="w-full max-w-6xl mb-4 flex items-center justify-between bg-[#121218] border border-zinc-800/50 px-4 py-3 rounded-2xl shadow-lg">
         <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView("home")}>
@@ -964,7 +914,6 @@ export default function VideoAnalyzer() {
       {/* ══ ANALYZER VIEW ══ */}
       {view === "analyzer" && (
         <div className="w-full max-w-6xl bg-[#121218] border border-zinc-800/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn">
-
           {/* フォルダバー */}
           <div className="bg-[#191924] border-b border-zinc-800/50 p-2 flex flex-col md:flex-row md:items-center gap-2 justify-between">
             <div className="flex items-center gap-1 overflow-x-auto">
@@ -977,7 +926,6 @@ export default function VideoAnalyzer() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 self-end md:self-auto flex-wrap">
-              {/* クリップパネルボタン */}
               <button onClick={() => setShowClipsPanel(!showClipsPanel)}
                 className={`p-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 transition-all ${showClipsPanel ? "bg-red-500/20 border-red-500/40 text-red-400" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"}`}>
                 <Film size={12} /><span>クリップ {clipTabs.length > 0 ? `(${clipTabs.length})` : ""}</span>
@@ -1104,7 +1052,7 @@ export default function VideoAnalyzer() {
           {/* メインレイアウト */}
           <div className="flex flex-col lg:flex-row border-b border-zinc-800/50">
             <div className="flex-1 bg-black flex flex-col border-b lg:border-b-0 lg:border-r border-zinc-800/50">
-
+              
               {/* 動画表示領域 */}
               <div className="relative flex flex-col md:flex-row items-stretch p-2 gap-2 bg-black">
                 {/* メイン動画 */}
@@ -1115,7 +1063,17 @@ export default function VideoAnalyzer() {
                   onDrop={handleMainDrop}
                 >
                   {activeTab?.videoSrc ? (
-                    <VideoPlayer vRef={videoRef} tab={activeTab} onTimeUpdate={handleTimeUpdate} />
+                    <VideoPlayer 
+                      vRef={videoRef} 
+                      tab={activeTab} 
+                      onTimeUpdate={handleTimeUpdate}
+                      compareMode={compareMode}
+                      setIsPlaying={setIsPlaying}
+                      setDuration={setDuration}
+                      setCompareDuration={setCompareDuration}
+                      togglePlay={togglePlay}
+                      syncPlay={syncPlay}
+                    />
                   ) : (
                     <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center text-zinc-600 gap-3 cursor-pointer text-xs p-8 w-full h-full justify-center select-none">
                       <div className="border-2 border-dashed border-zinc-700 rounded-2xl p-8 flex flex-col items-center gap-2 hover:border-cyan-500/50 hover:text-zinc-400 transition-all w-full">
@@ -1126,7 +1084,6 @@ export default function VideoAnalyzer() {
                     </div>
                   )}
                   {isDraggingMain && <div className="absolute inset-0 flex items-center justify-center bg-cyan-950/40 rounded-xl pointer-events-none z-30"><div className="text-cyan-300 font-black text-sm flex flex-col items-center gap-2"><Upload size={28} />ここにドロップ</div></div>}
-                  {compareMode && <div className="absolute bottom-2 left-2 text-[9px] font-mono text-zinc-500 bg-black/60 px-1.5 py-0.5 rounded border border-zinc-800">メイン</div>}
                   {/* 録画中表示 */}
                   {isRecording && (
                     <div className="absolute top-2 right-2 z-30 flex items-center gap-1.5 bg-black/80 backdrop-blur-sm border border-red-500/50 px-2.5 py-1 rounded-lg">
@@ -1147,7 +1104,20 @@ export default function VideoAnalyzer() {
                     onDrop={handleCompareDrop}
                   >
                     {compareTab?.videoSrc ? (
-                      <VideoPlayer vRef={compareVideoRef} tab={compareTab} controls={compareControls} isCompare onTimeUpdate={handleCompareTimeUpdate} />
+                      <VideoPlayer 
+                        vRef={compareVideoRef} 
+                        tab={compareTab} 
+                        controls={compareControls} 
+                        isCompare 
+                        onTimeUpdate={handleCompareTimeUpdate}
+                        compareMode={compareMode}
+                        compareTab={compareTab}
+                        setIsPlaying={setIsPlaying}
+                        setDuration={setDuration}
+                        setCompareDuration={setCompareDuration}
+                        togglePlay={togglePlay}
+                        syncPlay={syncPlay}
+                      />
                     ) : (
                       <div onClick={() => { if (!compareTabId) { const t: VideoTab = { ...makeDefaultTab(0), id: `tab-${Date.now()}`, name: `比較 ${tabs.length + 1}`, category: activeTab?.category ?? categories[0] ?? "その他" }; setTabs((prev) => [...prev, t]); setCompareTabId(t.id); setTimeout(() => compareFileInputRef.current?.click(), 50); } else { compareFileInputRef.current?.click(); } }}
                         className="flex flex-col items-center justify-center gap-3 cursor-pointer text-xs p-8 w-full h-full select-none">
@@ -1159,7 +1129,6 @@ export default function VideoAnalyzer() {
                       </div>
                     )}
                     {isDraggingCompare && <div className="absolute inset-0 flex items-center justify-center bg-violet-950/40 rounded-xl pointer-events-none z-30"><div className="text-violet-300 font-black text-sm flex flex-col items-center gap-2"><Upload size={28} />比較動画をドロップ</div></div>}
-                    <div className="absolute bottom-2 right-2 text-[9px] font-mono text-zinc-500 bg-black/60 px-1.5 py-0.5 rounded border border-zinc-800">{compareTab?.videoSrc ? `比較: ${compareTab.name}` : "比較"}</div>
                   </div>
                 )}
               </div>
@@ -1263,11 +1232,11 @@ export default function VideoAnalyzer() {
                   {/* 再生ボタン類 */}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                     <div className="flex items-center gap-1.5">
-                      <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all"><ChevronsLeft size={14} /></button>
-                      <button onClick={togglePlay} className="p-2.5 rounded-lg bg-cyan-500 text-black font-bold shadow-md shadow-cyan-500/10 hover:bg-cyan-400 transition-all">
+                      <button onClick={() => stepFrame("backward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all" title="コマ戻し (←キー)"><ChevronsLeft size={14} /></button>
+                      <button onClick={togglePlay} className="p-2.5 rounded-lg bg-cyan-500 text-black font-bold shadow-md shadow-cyan-500/10 hover:bg-cyan-400 transition-all" title="再生/一時停止 (Spaceキー)">
                         {isPlaying ? <Pause size={14} fill="black" /> : <Play size={14} fill="black" />}
                       </button>
-                      <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all"><ChevronsRight size={14} /></button>
+                      <button onClick={() => stepFrame("forward")} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white transition-all" title="コマ送り (→キー)"><ChevronsRight size={14} /></button>
 
                       {/* ⏺ 録画ボタン */}
                       <button
