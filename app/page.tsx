@@ -50,6 +50,7 @@ import {
 interface GoalNode {
   id: string;
   text: string;
+  placeholder?: string;
   completed: boolean;
   isExpanded?: boolean;
   children: GoalNode[];
@@ -72,6 +73,8 @@ interface VideoTab {
   panY: number;
   videoId?: string;
   isClip?: boolean;
+  /** 2画面比較用に自動生成された枠。ホームの統計・最近のセッションには出さない */
+  isCompareSlot?: boolean;
 }
 
 interface CompareControls {
@@ -87,13 +90,58 @@ interface CompareControls {
   syncOffset: number;
 }
 
-// ─── IndexedDB ────────────────────────────────────────────────────────────────
+// ─── Utils ────────────────────────────────────────────────────────────────────
+
+const FALLBACK_CATEGORY = "その他";
+
+const uid = (prefix: string) =>
+  `${prefix}-${
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }`;
+
+const lsGet = (key: string): string | null => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const lsSet = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn("localStorage への保存に失敗しました:", e);
+  }
+};
+
+const extFromBlob = (b: Blob) =>
+  b.type.includes("webm")
+    ? ".webm"
+    : b.type.includes("quicktime")
+      ? ".mov"
+      : ".mp4";
+
+const ensureFallbackCategory = (cats: string[]) =>
+  cats.includes(FALLBACK_CATEGORY) ? cats : [...cats, FALLBACK_CATEGORY];
+
+const formatTime = (t: number) => {
+  if (!isFinite(t) || t < 0) return "0:00";
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+};
+
+// ─── IndexedDB（接続を使い回す） ──────────────────────────────────────────────
 
 const DB_NAME = "video-analyzer-db";
 const STORE_NAME = "videos";
 
-const openDB = (): Promise<IDBDatabase> =>
-  new Promise((resolve, reject) => {
+let dbPromise: Promise<IDBDatabase> | null = null;
+
+const openDB = (): Promise<IDBDatabase> => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     if (typeof window === "undefined" || !window.indexedDB) {
       reject("unsupported");
       return;
@@ -103,9 +151,24 @@ const openDB = (): Promise<IDBDatabase> =>
       if (!req.result.objectStoreNames.contains(STORE_NAME))
         req.result.createObjectStore(STORE_NAME);
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onclose = () => {
+        dbPromise = null;
+      };
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
   });
+  dbPromise.catch(() => {
+    dbPromise = null;
+  });
+  return dbPromise;
+};
 
 const getVideoFromDB = async (id: string): Promise<Blob | null> => {
   const db = await openDB();
@@ -126,6 +189,7 @@ const saveVideoToDB = async (id: string, file: Blob): Promise<void> => {
     tx.objectStore(STORE_NAME).put(file, id);
     tx.oncomplete = () => res();
     tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
   });
 };
 
@@ -152,11 +216,6 @@ const GridOverlay = React.memo(() => (
   />
 ));
 GridOverlay.displayName = "GridOverlay";
-
-const formatTime = (t: number) => {
-  if (isNaN(t) || t < 0) return "0:00";
-  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
-};
 
 const RenderGoalNode = React.memo(
   ({
@@ -214,8 +273,8 @@ const RenderGoalNode = React.memo(
             type="text"
             value={node.text}
             onChange={(e) => onUpdateText(node.id, e.target.value)}
-            placeholder="目標を入力..."
-            className={`bg-transparent focus:outline-none flex-1 min-w-0 text-xs md:text-sm transition-all ${node.completed ? "text-zinc-600 line-through italic" : "text-zinc-200"} ${isRoot ? "font-black text-sm md:text-base text-white" : depth === 1 ? "font-bold text-cyan-300" : "font-medium"}`}
+            placeholder={node.placeholder ?? "目標を入力..."}
+            className={`bg-transparent focus:outline-none flex-1 min-w-0 text-xs md:text-sm transition-all placeholder-zinc-600 ${node.completed ? "text-zinc-600 line-through italic" : "text-zinc-200"} ${isRoot ? "font-black text-sm md:text-base text-white" : depth === 1 ? "font-bold text-cyan-300" : "font-medium"}`}
           />
           <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity shrink-0">
             <button
@@ -262,26 +321,26 @@ const VideoPlayer = React.memo(
     tab,
     controls,
     isCompare = false,
-    onTimeUpdate,
     compareMode,
     compareTab,
     setIsPlaying,
     setDuration,
     setCompareDuration,
     togglePlay,
+    toggleComparePlay,
     syncPlay,
   }: {
     vRef: React.RefObject<HTMLVideoElement | null>;
     tab: VideoTab;
     controls?: CompareControls;
     isCompare?: boolean;
-    onTimeUpdate?: () => void;
     compareMode: boolean;
     compareTab?: VideoTab;
     setIsPlaying: React.Dispatch<React.SetStateAction<boolean>>;
     setDuration: React.Dispatch<React.SetStateAction<number>>;
     setCompareDuration: React.Dispatch<React.SetStateAction<number>>;
     togglePlay: () => void;
+    toggleComparePlay?: () => void;
     syncPlay: boolean;
   }) => {
     const mirror = isCompare ? (controls?.isMirrored ?? false) : tab.isMirrored;
@@ -303,7 +362,7 @@ const VideoPlayer = React.memo(
           }}
         >
           <div
-            className="w-full h-full flex items-center justify-center"
+            className="w-full h-full flex items-center justify-center relative"
             style={{ transform: `rotate(${rot}deg)` }}
           >
             <video
@@ -313,16 +372,30 @@ const VideoPlayer = React.memo(
               className={`w-full h-full object-contain ${mirror ? "scale-x-[-1]" : ""}`}
               onPlay={() => !isCompare && setIsPlaying(true)}
               onPause={() => !isCompare && setIsPlaying(false)}
-              onTimeUpdate={onTimeUpdate}
               onLoadedMetadata={() => {
-                if (vRef.current) {
+                const v = vRef.current;
+                if (!v) return;
+                const apply = () =>
                   isCompare
-                    ? setCompareDuration(vRef.current.duration)
-                    : setDuration(vRef.current.duration);
+                    ? setCompareDuration(v.duration)
+                    : setDuration(v.duration);
+                // MediaRecorder の webm は duration が Infinity になるため、
+                // 末尾までシークさせて実際の長さを取得する
+                if (v.duration === Infinity) {
+                  const onTU = () => {
+                    v.removeEventListener("timeupdate", onTU);
+                    v.currentTime = 0;
+                    apply();
+                  };
+                  v.addEventListener("timeupdate", onTU);
+                  v.currentTime = 1e101;
+                } else {
+                  apply();
                 }
               }}
               onClick={() => {
-                if (!isCompare || !syncPlay) togglePlay();
+                if (!isCompare || syncPlay) togglePlay();
+                else toggleComparePlay?.();
               }}
             />
             {grid && <GridOverlay />}
@@ -352,6 +425,96 @@ const VideoPlayer = React.memo(
 );
 VideoPlayer.displayName = "VideoPlayer";
 
+/**
+ * シークバー。currentTime をこのコンポーネント内だけで持つことで、
+ * 再生中に親コンポーネント全体が再レンダリングされるのを防ぐ。
+ */
+const SeekBar = React.memo(
+  ({
+    videoRef,
+    videoSrc,
+    duration,
+    loopStart,
+    loopEnd,
+    onSeek,
+  }: {
+    videoRef: React.RefObject<HTMLVideoElement | null>;
+    videoSrc: string | null;
+    duration: number;
+    loopStart: number | null;
+    loopEnd: number | null;
+    onSeek: (t: number) => void;
+  }) => {
+    const [t, setT] = useState(0);
+
+    useEffect(() => {
+      const v = videoRef.current;
+      if (!v) return;
+      const update = () => setT(v.currentTime);
+      v.addEventListener("timeupdate", update);
+      v.addEventListener("seeked", update);
+      v.addEventListener("loadedmetadata", update);
+      update();
+      return () => {
+        v.removeEventListener("timeupdate", update);
+        v.removeEventListener("seeked", update);
+        v.removeEventListener("loadedmetadata", update);
+      };
+    }, [videoRef, videoSrc]);
+
+    const valid = isFinite(duration) && duration > 0;
+
+    return (
+      <div className="flex items-center gap-3">
+        <span className="text-[10px] font-mono text-zinc-400 w-8">
+          {formatTime(t)}
+        </span>
+        <div className="relative flex-1 h-6 flex items-center">
+          <div className="absolute left-0 right-0 h-1 bg-zinc-800 rounded-lg pointer-events-none" />
+          {loopStart !== null && loopEnd !== null && valid && (
+            <div
+              className="absolute h-1 bg-cyan-500/40 pointer-events-none"
+              style={{
+                left: `${(loopStart / duration) * 100}%`,
+                width: `${((loopEnd - loopStart) / duration) * 100}%`,
+              }}
+            />
+          )}
+          {loopStart !== null && valid && (
+            <div
+              className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10"
+              style={{ left: `${(loopStart / duration) * 100}%` }}
+            />
+          )}
+          {loopEnd !== null && valid && (
+            <div
+              className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10"
+              style={{ left: `${(loopEnd / duration) * 100}%` }}
+            />
+          )}
+          <input
+            type="range"
+            min={0}
+            max={valid ? duration : 100}
+            step={0.01}
+            value={t}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              setT(v);
+              onSeek(v);
+            }}
+            className="w-full accent-white bg-transparent h-6 appearance-none cursor-pointer relative z-20 focus:outline-none"
+          />
+        </div>
+        <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">
+          {formatTime(duration)}
+        </span>
+      </div>
+    );
+  },
+);
+SeekBar.displayName = "SeekBar";
+
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_CC: CompareControls = {
@@ -368,7 +531,7 @@ const DEFAULT_CC: CompareControls = {
 };
 
 const makeDefaultTab = (index: number): VideoTab => ({
-  id: `tab-${Date.now()}`,
+  id: uid("tab"),
   name: `セッション ${index}`,
   videoSrc: null,
   isMirrored: false,
@@ -376,7 +539,7 @@ const makeDefaultTab = (index: number): VideoTab => ({
   showGrid: false,
   playbackRate: 1,
   notes: "",
-  category: "その他",
+  category: FALLBACK_CATEGORY,
   loopStart: null,
   loopEnd: null,
   zoom: 1,
@@ -384,48 +547,61 @@ const makeDefaultTab = (index: number): VideoTab => ({
   panY: 0,
 });
 
+const INITIAL_GOAL: GoalNode = {
+  id: "root",
+  text: "",
+  placeholder: "ここに大目標を入力（例：次のバトルでベスト4に入る）",
+  completed: false,
+  isExpanded: true,
+  children: [
+    {
+      id: "c-1",
+      text: "",
+      placeholder: "スキル（例：フットワークのバリエーション増加）",
+      completed: false,
+      isExpanded: true,
+      children: [],
+    },
+    {
+      id: "c-2",
+      text: "",
+      placeholder: "フィジカル（例：パワームーブ用の体幹・軸の安定）",
+      completed: false,
+      isExpanded: true,
+      children: [],
+    },
+    {
+      id: "c-3",
+      text: "",
+      placeholder: "戦術・研究（例：音ハメの引き出し・相手の研究）",
+      completed: false,
+      isExpanded: true,
+      children: [],
+    },
+  ],
+};
+
+const GLOBAL_CSS = `
+@keyframes vaFadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.animate-fadeIn{animation:vaFadeIn .25s ease-out}
+.no-scrollbar{scrollbar-width:none}
+.no-scrollbar::-webkit-scrollbar{display:none}
+`;
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function VideoAnalyzer() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [view, setView] = useState<"home" | "analyzer" | "goals">("home");
 
-  const [goalRoot, setGoalRoot] = useState<GoalNode>({
-    id: "root",
-    text: "ここに大目標を入力（例：次のバトルでベスト4に入る）",
-    completed: false,
-    isExpanded: true,
-    children: [
-      {
-        id: "c-1",
-        text: "スキル（例：フットワークのバリエーション増加）",
-        completed: false,
-        isExpanded: true,
-        children: [],
-      },
-      {
-        id: "c-2",
-        text: "フィジカル（例：パワームーブ用の体幹・軸の安定）",
-        completed: false,
-        isExpanded: true,
-        children: [],
-      },
-      {
-        id: "c-3",
-        text: "戦術・研究（例：音ハメの引き出し・相手の研究）",
-        completed: false,
-        isExpanded: true,
-        children: [],
-      },
-    ],
-  });
+  const [goalRoot, setGoalRoot] = useState<GoalNode>(INITIAL_GOAL);
 
   const [categories, setCategories] = useState<string[]>([
     "フットワーク",
     "パワームーブ",
     "バトル",
     "ルーティン",
-    "その他",
+    FALLBACK_CATEGORY,
   ]);
   const [tabs, setTabs] = useState<VideoTab[]>([
     { ...makeDefaultTab(1), id: "tab-1" },
@@ -440,7 +616,6 @@ export default function VideoAnalyzer() {
   const [showCompareZoomPanel, setShowCompareZoomPanel] = useState(false);
   const [currentCategory, setCurrentCategory] = useState("すべて");
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [compareDuration, setCompareDuration] = useState(0);
   const [editingTabId, setEditingTabId] = useState<string | null>(null);
@@ -458,9 +633,11 @@ export default function VideoAnalyzer() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<number | null>(null);
+  const recordingRafRef = useRef<number | null>(null);
 
   // ── クリップ state ──
   const [showClipsPanel, setShowClipsPanel] = useState(false);
+  const [accurateTrim, setAccurateTrim] = useState(false);
   const [trimStatus, setTrimStatus] = useState<
     "idle" | "loading" | "trimming" | "done" | "error"
   >("idle");
@@ -471,6 +648,7 @@ export default function VideoAnalyzer() {
   const compareFileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const compareVideoRef = useRef<HTMLVideoElement>(null);
+  const frameDurRef = useRef(1 / 30);
 
   const tabsRef = useRef(tabs);
   useEffect(() => {
@@ -485,6 +663,13 @@ export default function VideoAnalyzer() {
     () => tabs.find((t) => t.id === activeTabId) ?? tabs[0],
     [tabs, activeTabId],
   );
+  // 存在しない activeTabId を指していても編集が効くよう、実際に使われているタブのIDを使う
+  const effectiveActiveId = activeTab?.id ?? activeTabId;
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
   const compareTab = useMemo(
     () => tabs.find((t) => t.id === compareTabId),
     [tabs, compareTabId],
@@ -498,6 +683,10 @@ export default function VideoAnalyzer() {
     [tabs, currentCategory],
   );
   const clipTabs = useMemo(() => tabs.filter((t) => t.isClip), [tabs]);
+  const sessionTabs = useMemo(
+    () => tabs.filter((t) => !t.isClip && !t.isCompareSlot),
+    [tabs],
+  );
 
   // ─── Persist / Restore ───────────────────────────────────────────────────────
 
@@ -506,37 +695,53 @@ export default function VideoAnalyzer() {
       document.body.style.backgroundColor = "#0b0b0f";
       document.documentElement.style.backgroundColor = "#0b0b0f";
     }
+    // ブラウザによるストレージの自動削除を防ぐ
     try {
-      const s = localStorage.getItem("video-analyzer-goals");
+      void navigator.storage?.persist?.()?.catch?.(() => {});
+    } catch {}
+
+    try {
+      const s = lsGet("video-analyzer-goals");
       if (s) setGoalRoot(JSON.parse(s));
     } catch {}
     try {
-      const s = localStorage.getItem("video-analyzer-categories");
-      if (s) setCategories(JSON.parse(s));
+      const s = lsGet("video-analyzer-categories");
+      if (s) setCategories(ensureFallbackCategory(JSON.parse(s)));
     } catch {}
     try {
-      const s = localStorage.getItem("video-analyzer-active-tab");
-      if (s) setActiveTabId(s);
-    } catch {}
-    try {
-      const s = localStorage.getItem("video-analyzer-compare-controls");
-      if (s) setCompareControls(JSON.parse(s));
+      const s = lsGet("video-analyzer-compare-controls");
+      if (s) setCompareControls({ ...DEFAULT_CC, ...JSON.parse(s) });
     } catch {}
 
     (async () => {
       try {
-        const s = localStorage.getItem("video-analyzer-tabs");
-        const base: VideoTab[] = s
-          ? JSON.parse(s)
-          : [{ ...makeDefaultTab(1), id: "tab-1" }];
+        const s = lsGet("video-analyzer-tabs");
+        const parsed: VideoTab[] = s ? JSON.parse(s) : [];
+        const base: VideoTab[] =
+          Array.isArray(parsed) && parsed.length
+            ? parsed
+            : [{ ...makeDefaultTab(1), id: "tab-1" }];
         const restored = await Promise.all(
           base.map(async (tab) => {
-            if (!tab.videoId) return tab;
-            const blob = await getVideoFromDB(tab.videoId);
-            return blob ? { ...tab, videoSrc: URL.createObjectURL(blob) } : tab;
+            if (!tab.videoId) return { ...tab, videoSrc: null };
+            try {
+              const blob = await getVideoFromDB(tab.videoId);
+              return blob
+                ? { ...tab, videoSrc: URL.createObjectURL(blob) }
+                : { ...tab, videoSrc: null };
+            } catch {
+              return { ...tab, videoSrc: null };
+            }
           }),
         );
         setTabs(restored);
+        // 保存されていたアクティブタブが存在するか検証する
+        const savedActive = lsGet("video-analyzer-active-tab");
+        setActiveTabId(
+          restored.some((t) => t.id === savedActive)
+            ? (savedActive as string)
+            : restored[0].id,
+        );
       } catch {}
       setIsLoaded(true);
     })();
@@ -550,32 +755,24 @@ export default function VideoAnalyzer() {
 
   useEffect(() => {
     if (isLoaded)
-      localStorage.setItem(
-        "video-analyzer-categories",
-        JSON.stringify(categories),
-      );
+      lsSet("video-analyzer-categories", JSON.stringify(categories));
   }, [categories, isLoaded]);
   useEffect(() => {
     if (isLoaded)
-      localStorage.setItem(
+      lsSet(
         "video-analyzer-tabs",
         JSON.stringify(tabs.map((t) => ({ ...t, videoSrc: null }))),
       );
   }, [tabs, isLoaded]);
   useEffect(() => {
-    if (isLoaded)
-      localStorage.setItem("video-analyzer-active-tab", activeTabId);
-  }, [activeTabId, isLoaded]);
+    if (isLoaded) lsSet("video-analyzer-active-tab", effectiveActiveId);
+  }, [effectiveActiveId, isLoaded]);
   useEffect(() => {
-    if (isLoaded)
-      localStorage.setItem("video-analyzer-goals", JSON.stringify(goalRoot));
+    if (isLoaded) lsSet("video-analyzer-goals", JSON.stringify(goalRoot));
   }, [goalRoot, isLoaded]);
   useEffect(() => {
     if (isLoaded)
-      localStorage.setItem(
-        "video-analyzer-compare-controls",
-        JSON.stringify(compareControls),
-      );
+      lsSet("video-analyzer-compare-controls", JSON.stringify(compareControls));
   }, [compareControls, isLoaded]);
 
   useEffect(() => {
@@ -589,6 +786,90 @@ export default function VideoAnalyzer() {
   useEffect(() => {
     setIsPlaying(false);
   }, [activeTabId, view]);
+
+  // ─── フレーム長の推定（fps に合わせたコマ送り） ─────────────────────────────
+  useEffect(() => {
+    const v = videoRef.current;
+    frameDurRef.current = 1 / 30;
+    if (!v || !activeTab?.videoSrc) return;
+    const anyV = v as any;
+    if (typeof anyV.requestVideoFrameCallback !== "function") return;
+
+    let id = 0;
+    let cancelled = false;
+    let lastT: number | null = null;
+    let lastN: number | null = null;
+
+    const cb = (_now: number, meta: any) => {
+      if (cancelled) return;
+      if (!v.paused && lastT !== null && lastN !== null) {
+        const d = meta.mediaTime - lastT;
+        if (meta.presentedFrames - lastN === 1 && d > 0.004 && d < 0.1) {
+          frameDurRef.current = frameDurRef.current * 0.8 + d * 0.2;
+        }
+      }
+      lastT = meta.mediaTime;
+      lastN = meta.presentedFrames;
+      id = anyV.requestVideoFrameCallback(cb);
+    };
+    id = anyV.requestVideoFrameCallback(cb);
+    return () => {
+      cancelled = true;
+      anyV.cancelVideoFrameCallback?.(id);
+    };
+  }, [activeTab?.videoSrc, view]);
+
+  // ─── ループ監視（requestAnimationFrame で高精度に） ──────────────────────────
+  const mainLoopStart = activeTab?.loopStart ?? null;
+  const mainLoopEnd = activeTab?.loopEnd ?? null;
+  useEffect(() => {
+    if (view !== "analyzer") return;
+    const mainLoop = mainLoopStart !== null && mainLoopEnd !== null;
+    const cmpLoop =
+      compareMode &&
+      compareControls.loopStart !== null &&
+      compareControls.loopEnd !== null;
+    if (!mainLoop && !cmpLoop) return;
+
+    let raf = 0;
+    const tick = () => {
+      const v = videoRef.current;
+      const cv = compareVideoRef.current;
+      if (
+        mainLoop &&
+        v &&
+        !v.paused &&
+        v.currentTime >= (mainLoopEnd as number)
+      ) {
+        v.currentTime = mainLoopStart as number;
+        if (compareMode && syncPlay && cv)
+          cv.currentTime = Math.max(
+            0,
+            (mainLoopStart as number) + compareControls.syncOffset,
+          );
+      }
+      if (
+        cmpLoop &&
+        cv &&
+        !cv.paused &&
+        cv.currentTime >= (compareControls.loopEnd as number)
+      ) {
+        cv.currentTime = compareControls.loopStart as number;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [
+    view,
+    mainLoopStart,
+    mainLoopEnd,
+    compareMode,
+    syncPlay,
+    compareControls.loopStart,
+    compareControls.loopEnd,
+    compareControls.syncOffset,
+  ]);
 
   // ─── Goal helpers ─────────────────────────────────────────────────────────────
 
@@ -619,8 +900,9 @@ export default function VideoAnalyzer() {
   const handleAddChildGoal = useCallback(
     (pid: string) => {
       const n: GoalNode = {
-        id: `goal-${Date.now()}`,
-        text: "新しい目標・行動",
+        id: uid("goal"),
+        text: "",
+        placeholder: "新しい目標・行動",
         completed: false,
         isExpanded: true,
         children: [],
@@ -665,9 +947,9 @@ export default function VideoAnalyzer() {
   const updateActiveTab = useCallback(
     (u: Partial<VideoTab>) =>
       setTabs((prev) =>
-        prev.map((t) => (t.id === activeTabId ? { ...t, ...u } : t)),
+        prev.map((t) => (t.id === effectiveActiveId ? { ...t, ...u } : t)),
       ),
-    [activeTabId],
+    [effectiveActiveId],
   );
   const updateCC = useCallback(
     (u: Partial<CompareControls>) =>
@@ -678,12 +960,14 @@ export default function VideoAnalyzer() {
   const addNewTab = useCallback(
     (defaultCategory?: string) => {
       const t = {
-        ...makeDefaultTab(tabsRef.current.length + 1),
-        id: `tab-${Date.now()}`,
+        ...makeDefaultTab(
+          tabsRef.current.filter((x) => !x.isClip && !x.isCompareSlot).length +
+            1,
+        ),
         category:
           defaultCategory ??
           (currentCategory === "すべて"
-            ? (categories[0] ?? "その他")
+            ? (categories[0] ?? FALLBACK_CATEGORY)
             : currentCategory),
       };
       setTabs((prev) => [...prev, t]);
@@ -698,26 +982,28 @@ export default function VideoAnalyzer() {
     async (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
       if (tabsRef.current.length === 1) return;
+      if (!window.confirm("この動画を削除しますか？（元に戻せません）")) return;
       const t = tabsRef.current.find((x) => x.id === id);
       try {
         if (t?.videoId) await deleteVideoFromDB(t.videoId);
-        if (t?.videoSrc) URL.revokeObjectURL(t.videoSrc);
       } catch {}
-      setTabs((prev) => {
-        const f = prev.filter((x) => x.id !== id);
-        if (activeTabId === id) setActiveTabId(f[f.length - 1].id);
-        return f;
-      });
+      if (t?.videoSrc) URL.revokeObjectURL(t.videoSrc);
+
+      const remaining = tabsRef.current.filter((x) => x.id !== id);
+      setTabs(remaining);
+      if (effectiveActiveId === id)
+        setActiveTabId(remaining[remaining.length - 1].id);
+      if (compareTabIdRef.current === id) setCompareTabId(null);
       setIsPlaying(false);
     },
-    [activeTabId],
+    [effectiveActiveId],
   );
 
   const startRename = useCallback((tab: VideoTab, e: React.MouseEvent) => {
     e.stopPropagation();
     setEditingTabId(tab.id);
     setEditName(tab.name);
-    setEditCategory(tab.category ?? "その他");
+    setEditCategory(tab.category ?? FALLBACK_CATEGORY);
   }, []);
   const saveRename = useCallback(() => {
     if (editName.trim())
@@ -733,54 +1019,16 @@ export default function VideoAnalyzer() {
 
   // ─── File load ────────────────────────────────────────────────────────────────
 
-  const handleFileChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>, targetTabId?: string) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const id = targetTabId ?? activeTabId;
-        const cur = tabsRef.current.find((t) => t.id === id);
-        if (cur?.videoSrc) URL.revokeObjectURL(cur.videoSrc);
-        const videoId = `video-${Date.now()}`;
-        await saveVideoToDB(videoId, file);
-        const src = URL.createObjectURL(file);
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.id === id
-              ? {
-                  ...t,
-                  videoSrc: src,
-                  videoId,
-                  name: file.name.substring(0, 20),
-                }
-              : t,
-          ),
-        );
-        setIsPlaying(false);
-      } catch (err) {
-        console.error(err);
-      }
-      e.target.value = "";
-    },
-    [activeTabId],
-  );
-
-  const handleCompareFileChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const id = compareTabIdRef.current;
-      if (!id) return;
-      await handleFileChange(e, id);
-    },
-    [handleFileChange],
-  );
-
-  const handleDropFile = useCallback(
+  /** 動画ファイルをタブに読み込む（ファイル選択・ドロップ共通） */
+  const loadVideoIntoTab = useCallback(
     async (file: File, targetTabId: string) => {
-      if (!file.type.startsWith("video/")) return;
+      if (file.type && !file.type.startsWith("video/")) {
+        alert("動画ファイルを選択してください");
+        return;
+      }
       try {
         const cur = tabsRef.current.find((t) => t.id === targetTabId);
-        if (cur?.videoSrc) URL.revokeObjectURL(cur.videoSrc);
-        const videoId = `video-${Date.now()}`;
+        const videoId = uid("video");
         await saveVideoToDB(videoId, file);
         const src = URL.createObjectURL(file);
         setTabs((prev) =>
@@ -791,16 +1039,57 @@ export default function VideoAnalyzer() {
                   videoSrc: src,
                   videoId,
                   name: file.name.substring(0, 20),
+                  loopStart: null,
+                  loopEnd: null,
                 }
               : t,
           ),
         );
+        // 差し替え前の動画を掃除（容量を食い続けないように）
+        if (cur?.videoSrc) URL.revokeObjectURL(cur.videoSrc);
+        if (cur?.videoId) await deleteVideoFromDB(cur.videoId).catch(() => {});
         setIsPlaying(false);
       } catch (err) {
         console.error(err);
+        alert(
+          "動画の保存に失敗しました（ストレージ容量不足の可能性があります）",
+        );
       }
     },
     [],
+  );
+
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      await loadVideoIntoTab(file, effectiveActiveId);
+    },
+    [effectiveActiveId, loadVideoIntoTab],
+  );
+
+  const handleCompareFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      const id = compareTabIdRef.current;
+      if (!file || !id) return;
+      await loadVideoIntoTab(file, id);
+      updateCC({ loopStart: null, loopEnd: null });
+    },
+    [loadVideoIntoTab, updateCC],
+  );
+
+  const makeCompareSlot = useCallback(
+    (name?: string): VideoTab => ({
+      ...makeDefaultTab(0),
+      name: name ?? `比較 ${tabsRef.current.length + 1}`,
+      category:
+        activeTabRef.current?.category ?? categories[0] ?? FALLBACK_CATEGORY,
+      isCompareSlot: true,
+    }),
+    [categories],
   );
 
   const handleMainDrop = useCallback(
@@ -808,9 +1097,9 @@ export default function VideoAnalyzer() {
       e.preventDefault();
       setIsDraggingMain(false);
       const file = e.dataTransfer.files?.[0];
-      if (file) await handleDropFile(file, activeTabId);
+      if (file) await loadVideoIntoTab(file, effectiveActiveId);
     },
-    [activeTabId, handleDropFile],
+    [effectiveActiveId, loadVideoIntoTab],
   );
 
   const handleCompareDrop = useCallback(
@@ -820,24 +1109,18 @@ export default function VideoAnalyzer() {
       const file = e.dataTransfer.files?.[0];
       if (!file) return;
       if (!compareTabId) {
-        const newTab: VideoTab = {
-          ...makeDefaultTab(0),
-          id: `tab-${Date.now()}`,
-          name: file.name.substring(0, 20),
-          category: activeTab?.category ?? categories[0] ?? "その他",
-        };
+        const newTab = makeCompareSlot(file.name.substring(0, 20));
         setTabs((prev) => [...prev, newTab]);
+        compareTabIdRef.current = newTab.id;
         setCompareTabId(newTab.id);
         setCompareMode(true);
-        setTimeout(async () => {
-          await handleDropFile(file, newTab.id);
-        }, 50);
+        await loadVideoIntoTab(file, newTab.id);
       } else {
-        await handleDropFile(file, compareTabId);
+        await loadVideoIntoTab(file, compareTabId);
         setCompareMode(true);
       }
     },
-    [compareTabId, activeTab, categories, handleDropFile],
+    [compareTabId, makeCompareSlot, loadVideoIntoTab],
   );
 
   const handleMainDragLeave = useCallback((e: React.DragEvent) => {
@@ -853,32 +1136,41 @@ export default function VideoAnalyzer() {
   // ─── Playback ─────────────────────────────────────────────────────────────────
 
   const togglePlay = useCallback(() => {
-    if (!videoRef.current) return;
-    if (isPlaying) {
-      videoRef.current.pause();
-      if (compareMode && syncPlay && compareVideoRef.current)
-        compareVideoRef.current.pause();
+    const v = videoRef.current;
+    if (!v) return;
+    const cv = compareVideoRef.current;
+    if (!v.paused) {
+      v.pause();
+      if (compareMode && syncPlay && cv) cv.pause();
     } else {
-      videoRef.current.play();
-      if (compareMode && syncPlay && compareVideoRef.current) {
-        compareVideoRef.current.currentTime =
-          videoRef.current.currentTime + compareControls.syncOffset;
-        compareVideoRef.current.play().catch(() => {});
+      v.play().catch(() => {});
+      if (compareMode && syncPlay && cv) {
+        cv.currentTime = Math.max(
+          0,
+          v.currentTime + compareControls.syncOffset,
+        );
+        cv.play().catch(() => {});
       }
     }
-    setIsPlaying((p) => !p);
-  }, [isPlaying, compareMode, syncPlay, compareControls.syncOffset]);
+  }, [compareMode, syncPlay, compareControls.syncOffset]);
+
+  const toggleComparePlay = useCallback(() => {
+    const v = compareVideoRef.current;
+    if (!v) return;
+    if (v.paused) v.play().catch(() => {});
+    else v.pause();
+  }, []);
 
   const stepFrame = useCallback(
     (direction: "forward" | "backward", step = 1) => {
-      if (!videoRef.current) return;
-      videoRef.current.pause();
-      if (compareVideoRef.current) compareVideoRef.current.pause();
-      setIsPlaying(false);
-      const delta = ((direction === "forward" ? 1 : -1) * step) / 30;
-      const newTime = Math.max(0, videoRef.current.currentTime + delta);
-      videoRef.current.currentTime = newTime;
-      setCurrentTime(newTime);
+      const v = videoRef.current;
+      if (!v) return;
+      v.pause();
+      compareVideoRef.current?.pause();
+      const delta =
+        (direction === "forward" ? 1 : -1) * step * frameDurRef.current;
+      const newTime = Math.max(0, v.currentTime + delta);
+      v.currentTime = newTime;
       if (compareMode && syncPlay && compareVideoRef.current)
         compareVideoRef.current.currentTime = Math.max(
           0,
@@ -888,11 +1180,28 @@ export default function VideoAnalyzer() {
     [compareMode, syncPlay, compareControls.syncOffset],
   );
 
+  const seekTo = useCallback(
+    (time: number) => {
+      const v = videoRef.current;
+      if (!v) return;
+      v.currentTime = time;
+      if (compareMode && syncPlay && compareVideoRef.current)
+        compareVideoRef.current.currentTime = Math.max(
+          0,
+          time + compareControls.syncOffset,
+        );
+    },
+    [compareMode, syncPlay, compareControls.syncOffset],
+  );
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const t = e.target;
+      // スライダー以外の入力要素ではショートカットを無効にする
       if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement
+        t instanceof HTMLTextAreaElement ||
+        t instanceof HTMLSelectElement ||
+        (t instanceof HTMLInputElement && t.type !== "range")
       )
         return;
       if (view !== "analyzer") return;
@@ -915,61 +1224,36 @@ export default function VideoAnalyzer() {
 
   const jumpToTime = useCallback(
     (seconds: number) => {
-      if (!videoRef.current) return;
-      videoRef.current.currentTime = seconds;
-      setCurrentTime(seconds);
+      const v = videoRef.current;
+      if (!v) return;
+      v.currentTime = seconds;
       if (compareMode && syncPlay && compareVideoRef.current)
         compareVideoRef.current.currentTime = Math.max(
           0,
           seconds + compareControls.syncOffset,
         );
-      if (!isPlaying) {
-        videoRef.current.play().catch(() => {});
+      if (v.paused) {
+        v.play().catch(() => {});
         if (compareMode && syncPlay && compareVideoRef.current)
           compareVideoRef.current.play().catch(() => {});
-        setIsPlaying(true);
       }
     },
-    [compareMode, syncPlay, compareControls.syncOffset, isPlaying],
+    [compareMode, syncPlay, compareControls.syncOffset],
   );
-
-  const handleTimeUpdate = useCallback(() => {
-    if (!videoRef.current) return;
-    const time = videoRef.current.currentTime;
-    setCurrentTime(time);
-    if (
-      activeTab?.loopStart !== null &&
-      activeTab?.loopEnd !== null &&
-      activeTab.loopStart !== undefined &&
-      activeTab.loopEnd !== undefined
-    ) {
-      if (time >= activeTab.loopEnd) {
-        videoRef.current.currentTime = activeTab.loopStart;
-        if (compareMode && syncPlay && compareVideoRef.current)
-          compareVideoRef.current.currentTime =
-            activeTab.loopStart + compareControls.syncOffset;
-      }
-    }
-  }, [activeTab, compareMode, syncPlay, compareControls.syncOffset]);
-
-  const handleCompareTimeUpdate = useCallback(() => {
-    if (!compareVideoRef.current) return;
-    const time = compareVideoRef.current.currentTime;
-    if (
-      compareControls.loopStart !== null &&
-      compareControls.loopEnd !== null &&
-      time >= compareControls.loopEnd
-    )
-      compareVideoRef.current.currentTime = compareControls.loopStart;
-  }, [compareControls.loopStart, compareControls.loopEnd]);
 
   const setLoopPoint = useCallback(
     (type: "start" | "end") => {
       if (!videoRef.current) return;
       const time = videoRef.current.currentTime;
       if (type === "start") {
-        updateActiveTab({ loopStart: time });
-      } else if (type === "end") {
+        const end = activeTab?.loopEnd;
+        // A点がB点以降になる場合はB点を解除する
+        updateActiveTab(
+          end != null && time >= end
+            ? { loopStart: time, loopEnd: null }
+            : { loopStart: time },
+        );
+      } else {
         if (
           activeTab?.loopStart === null ||
           activeTab?.loopStart === undefined ||
@@ -993,14 +1277,21 @@ export default function VideoAnalyzer() {
     (type: "start" | "end") => {
       if (!compareVideoRef.current) return;
       const time = compareVideoRef.current.currentTime;
-      if (type === "start") updateCC({ loopStart: time });
-      else if (
+      if (type === "start") {
+        const end = compareControls.loopEnd;
+        updateCC(
+          end !== null && time >= end
+            ? { loopStart: time, loopEnd: null }
+            : { loopStart: time },
+        );
+      } else if (
         compareControls.loopStart === null ||
         time > compareControls.loopStart
       )
         updateCC({ loopEnd: time });
+      else alert("B点（終了）はA点（開始）より後ろの時間に設定してください");
     },
-    [compareControls.loopStart, updateCC],
+    [compareControls.loopStart, compareControls.loopEnd, updateCC],
   );
 
   const clearCompareLoop = useCallback(
@@ -1008,7 +1299,7 @@ export default function VideoAnalyzer() {
     [updateCC],
   );
 
-  // ─── 録画 ───────────────────────────────────────────────────────────────────────
+  // ─── 録画（ミラー・回転・ズーム・グリッドを canvas 経由で反映） ─────────────
   const stopRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
@@ -1019,14 +1310,11 @@ export default function VideoAnalyzer() {
   const startRecording = useCallback(() => {
     if (isRecording) return;
     const video = videoRef.current;
-    if (!video) {
+    if (!video || !video.videoWidth) {
       alert("動画を先に読み込んでください");
       return;
     }
-
-    const captureStream =
-      (video as any).captureStream ?? (video as any).mozCaptureStream;
-    if (!captureStream) {
+    if (typeof MediaRecorder === "undefined") {
       alert(
         "このブラウザは動画録画に対応していません。Chrome / Edgeで試してください。",
       );
@@ -1034,7 +1322,63 @@ export default function VideoAnalyzer() {
     }
 
     try {
-      const stream = captureStream.call(video);
+      // キャンバスサイズ（回転90/270なら縦横入れ替え、長辺は最大1920に制限）
+      const t0 = activeTabRef.current;
+      const swap = (t0?.rotation ?? 0) % 180 !== 0;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const sc = Math.min(1, 1920 / Math.max(vw, vh));
+      const dw = Math.round(vw * sc);
+      const dh = Math.round(vh * sc);
+      const canvas = document.createElement("canvas");
+      canvas.width = swap ? dh : dw;
+      canvas.height = swap ? dw : dh;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        alert("録画用の描画コンテキストを作成できませんでした。");
+        return;
+      }
+
+      const drawFrame = () => {
+        const t = activeTabRef.current;
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const k = cw / Math.max(1, video.clientWidth || cw);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, cw, ch);
+        ctx.save();
+        ctx.translate(cw / 2 + (t?.panX ?? 0) * k, ch / 2 + (t?.panY ?? 0) * k);
+        ctx.scale(t?.zoom ?? 1, t?.zoom ?? 1);
+        ctx.rotate(((t?.rotation ?? 0) * Math.PI) / 180);
+        ctx.scale(t?.isMirrored ? -1 : 1, 1);
+        ctx.drawImage(video, -dw / 2, -dh / 2, dw, dh);
+        ctx.restore();
+        if (t?.showGrid) {
+          ctx.strokeStyle = "rgba(255,255,255,0.25)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let i = 1; i < 3; i++) {
+            ctx.moveTo((cw * i) / 3, 0);
+            ctx.lineTo((cw * i) / 3, ch);
+            ctx.moveTo(0, (ch * i) / 3);
+            ctx.lineTo(cw, (ch * i) / 3);
+          }
+          ctx.stroke();
+        }
+        recordingRafRef.current = requestAnimationFrame(drawFrame);
+      };
+
+      const canvasStream = canvas.captureStream(30);
+      // 音声は元動画から取得
+      try {
+        const cap =
+          (video as any).captureStream ?? (video as any).mozCaptureStream;
+        if (cap) {
+          const vs: MediaStream = cap.call(video);
+          vs.getAudioTracks().forEach((tr) => canvasStream.addTrack(tr));
+        }
+      } catch {}
+
       const mimeTypes = [
         "video/webm;codecs=vp9,opus",
         "video/webm;codecs=vp8,opus",
@@ -1043,39 +1387,39 @@ export default function VideoAnalyzer() {
       const mimeType = mimeTypes.find((type) =>
         MediaRecorder.isTypeSupported(type),
       );
-
       if (!mimeType) {
         alert("このブラウザで録画できる動画形式が見つかりません。");
         return;
       }
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(canvasStream, { mimeType });
       recordingChunksRef.current = [];
+
+      const cleanup = () => {
+        if (recordingRafRef.current !== null) {
+          cancelAnimationFrame(recordingRafRef.current);
+          recordingRafRef.current = null;
+        }
+        if (recordingTimerRef.current !== null) {
+          window.clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+        canvasStream.getTracks().forEach((tr) => tr.stop());
+        setIsRecording(false);
+        setRecordingTime(0);
+        mediaRecorderRef.current = null;
+      };
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) recordingChunksRef.current.push(event.data);
       };
       recorder.onerror = (event) => {
         console.error("MediaRecorder error:", event);
-        if (recordingTimerRef.current !== null) {
-          window.clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-        setIsRecording(false);
-        setRecordingTime(0);
-        mediaRecorderRef.current = null;
+        cleanup();
         alert("録画中にエラーが発生しました。");
       };
-
       recorder.onstop = async () => {
-        if (recordingTimerRef.current !== null) {
-          window.clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-        setIsRecording(false);
-        setRecordingTime(0);
-        mediaRecorderRef.current = null;
-
+        cleanup();
         const chunks = recordingChunksRef.current;
         recordingChunksRef.current = [];
         if (!chunks.length) return;
@@ -1084,8 +1428,7 @@ export default function VideoAnalyzer() {
           const blob = new Blob(chunks, {
             type: recorder.mimeType || "video/webm",
           });
-          const clipId = `recording-${Date.now()}`;
-          const clipTabId = `tab-${Date.now()}-recording`;
+          const clipId = uid("recording");
           const clipName = `録画 ${new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
 
           await saveVideoToDB(clipId, blob);
@@ -1093,16 +1436,18 @@ export default function VideoAnalyzer() {
 
           const clipTab: VideoTab = {
             ...makeDefaultTab(0),
-            id: clipTabId,
             name: clipName,
             videoSrc: src,
             videoId: clipId,
-            category: activeTab?.category ?? categories[0] ?? "その他",
+            category:
+              activeTabRef.current?.category ??
+              categories[0] ??
+              FALLBACK_CATEGORY,
             isClip: true,
           };
 
           setTabs((prev) => [...prev, clipTab]);
-          setActiveTabId(clipTabId);
+          setActiveTabId(clipTab.id);
           setIsPlaying(false);
           setShowClipsPanel(true);
         } catch (error) {
@@ -1111,6 +1456,7 @@ export default function VideoAnalyzer() {
         }
       };
 
+      recordingRafRef.current = requestAnimationFrame(drawFrame);
       recorder.start(250);
       mediaRecorderRef.current = recorder;
       setRecordingTime(0);
@@ -1123,14 +1469,14 @@ export default function VideoAnalyzer() {
       console.error("録画開始エラー:", error);
       alert("録画を開始できませんでした。");
     }
-  }, [isRecording, activeTab, categories]);
+  }, [isRecording, categories]);
 
   useEffect(() => {
     return () => {
-      if (recordingTimerRef.current !== null) {
+      if (recordingRafRef.current !== null)
+        cancelAnimationFrame(recordingRafRef.current);
+      if (recordingTimerRef.current !== null)
         window.clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
       if (
         mediaRecorderRef.current &&
         mediaRecorderRef.current.state !== "inactive"
@@ -1139,33 +1485,18 @@ export default function VideoAnalyzer() {
     };
   }, []);
 
-  // ─── FFmpeg トリミング ─────────────────────────────
+  // ─── FFmpeg トリミング（ローカル配信の ffmpeg-core を使用） ───────────────────
   const loadFFmpeg = useCallback(async () => {
     if (ffmpegLoadedRef.current) return ffmpegRef.current;
     setTrimStatus("loading");
     try {
-      const ffmpegModule = (await import(
-        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js" as string
-      )) as any;
-      const utilModule = (await import(
-        /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js" as string
-      )) as any;
-
-      const { FFmpeg } = ffmpegModule;
-      const { fetchFile, toBlobURL } = utilModule;
+      const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+      const { fetchFile } = await import("@ffmpeg/util");
 
       const ffmpeg = new FFmpeg();
-      const baseURL =
-        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm";
       await ffmpeg.load({
-        coreURL: await toBlobURL(
-          `${baseURL}/ffmpeg-core.js`,
-          "text/javascript",
-        ),
-        wasmURL: await toBlobURL(
-          `${baseURL}/ffmpeg-core.wasm`,
-          "application/wasm",
-        ),
+        coreURL: "/ffmpeg/ffmpeg-core.js",
+        wasmURL: "/ffmpeg/ffmpeg-core.wasm",
       });
 
       ffmpegRef.current = { ffmpeg, fetchFile };
@@ -1174,6 +1505,7 @@ export default function VideoAnalyzer() {
     } catch (e) {
       console.error("FFmpeg Load Error:", e);
       setTrimStatus("error");
+      setTimeout(() => setTrimStatus("idle"), 3000);
       return null;
     }
   }, []);
@@ -1193,7 +1525,9 @@ export default function VideoAnalyzer() {
     try {
       const loaded = await loadFFmpeg();
       if (!loaded) {
-        alert("FFmpegの読み込みに失敗しました");
+        alert(
+          "FFmpegの読み込みに失敗しました。public/ffmpeg/ に ffmpeg-core.js / ffmpeg-core.wasm があるか確認してください。",
+        );
         return;
       }
       const { ffmpeg, fetchFile } = loaded;
@@ -1203,44 +1537,67 @@ export default function VideoAnalyzer() {
       const sourceBlob = await getVideoFromDB(activeTab.videoId);
       if (!sourceBlob) {
         setTrimStatus("error");
+        setTimeout(() => setTrimStatus("idle"), 3000);
         return;
       }
 
-      const ext = activeTab.name.match(/\.[^.]+$/)?.at(0) ?? ".mp4";
+      const ext = extFromBlob(sourceBlob);
       const inputName = `input${ext}`;
-      const outputName = "output.mp4";
+      const isWebm = ext === ".webm";
+      const outputName = !accurateTrim && isWebm ? "output.webm" : "output.mp4";
+      const trimDuration = end - start;
 
       await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
-      const trimDuration = end - start;
-      await ffmpeg.exec([
-        "-ss",
-        String(start),
-        "-i",
-        inputName,
-        "-t",
-        String(trimDuration),
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        outputName,
-      ]);
+      const args = accurateTrim
+        ? [
+            "-ss",
+            String(start),
+            "-i",
+            inputName,
+            "-t",
+            String(trimDuration),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            outputName,
+          ]
+        : [
+            "-ss",
+            String(start),
+            "-i",
+            inputName,
+            "-t",
+            String(trimDuration),
+            "-c",
+            "copy",
+            ...(outputName.endsWith(".mp4") ? ["-movflags", "+faststart"] : []),
+            outputName,
+          ];
+
+      const code = await ffmpeg.exec(args);
+      if (code !== 0) throw new Error(`ffmpeg exited with code ${code}`);
 
       const data = await ffmpeg.readFile(outputName);
-      const blob = new Blob([data], { type: "video/mp4" });
+      const blob = new Blob([data as unknown as BlobPart], {
+        type: outputName.endsWith(".webm") ? "video/webm" : "video/mp4",
+      });
 
-      await ffmpeg.deleteFile(inputName);
-      await ffmpeg.deleteFile(outputName);
+      await ffmpeg.deleteFile(inputName).catch(() => {});
+      await ffmpeg.deleteFile(outputName).catch(() => {});
 
-      const clipId = `clip-${Date.now()}`;
+      const clipId = uid("clip");
       const clipName = `クリップ ${formatTime(start)}〜${formatTime(end)}`;
       await saveVideoToDB(clipId, blob);
       const src = URL.createObjectURL(blob);
 
       const clipTab: VideoTab = {
         ...makeDefaultTab(0),
-        id: `tab-${Date.now()}`,
         name: clipName,
         videoSrc: src,
         videoId: clipId,
@@ -1258,17 +1615,34 @@ export default function VideoAnalyzer() {
       setTrimStatus("error");
       setTimeout(() => setTrimStatus("idle"), 3000);
     }
-  }, [activeTab, loadFFmpeg]);
+  }, [activeTab, loadFFmpeg, accurateTrim]);
 
-  const downloadClip = useCallback(async (tab: VideoTab) => {
-    if (!tab.videoId) return;
-    const blob = await getVideoFromDB(tab.videoId);
-    if (!blob) return;
+  const downloadBlob = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${tab.name}${tab.name.toLowerCase().endsWith(".webm") || tab.name.toLowerCase().endsWith(".mp4") ? "" : ".webm"}`;
+    a.href = url;
+    a.download = filename;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   }, []);
+
+  const withExt = (name: string, blob: Blob) =>
+    /\.(mp4|webm|mov|m4v|mkv)$/i.test(name)
+      ? name
+      : `${name}${extFromBlob(blob)}`;
+
+  const downloadClip = useCallback(
+    async (tab: VideoTab) => {
+      if (!tab.videoId) return;
+      const blob = await getVideoFromDB(tab.videoId);
+      if (!blob) {
+        alert("ファイルが見つかりません");
+        return;
+      }
+      downloadBlob(blob, withExt(tab.name, blob));
+    },
+    [downloadBlob],
+  );
 
   // ─── Notes ────────────────────────────────────────────────────────────────────
 
@@ -1287,7 +1661,7 @@ export default function VideoAnalyzer() {
       if (!text)
         return (
           <span className="text-zinc-600 text-xs">
-            ここにメモを入力するか、「⏱️ タイムスタンプ挿入」を押してください。
+            ここにメモを入力するか、「タイムスタンプ挿入」を押してください。
           </span>
         );
       return text.split("\n").map((line, i) => {
@@ -1332,10 +1706,13 @@ export default function VideoAnalyzer() {
 
   const deleteCategory = useCallback(
     (cat: string) => {
-      if (categories.length <= 1) return;
+      // 「その他」はタブの行き先なので削除できない
+      if (cat === FALLBACK_CATEGORY || categories.length <= 1) return;
       setCategories((p) => p.filter((c) => c !== cat));
       setTabs((p) =>
-        p.map((t) => (t.category === cat ? { ...t, category: "その他" } : t)),
+        p.map((t) =>
+          t.category === cat ? { ...t, category: FALLBACK_CATEGORY } : t,
+        ),
       );
       if (currentCategory === cat) setCurrentCategory("すべて");
     },
@@ -1357,42 +1734,55 @@ export default function VideoAnalyzer() {
       ],
       { type: "application/json" },
     );
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `dance-analyst-backup-${new Date().toISOString().split("T")[0]}.json`;
-    a.click();
-  }, [categories, tabs, goalRoot]);
+    downloadBlob(
+      blob,
+      `dance-analyst-backup-${new Date().toISOString().split("T")[0]}.json`,
+    );
+  }, [categories, tabs, goalRoot, downloadBlob]);
 
   const handleImportBackup = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
+      e.target.value = "";
       if (!file) return;
       const reader = new FileReader();
       reader.onload = async (ev) => {
         try {
           const d = JSON.parse(ev.target?.result as string);
-          if (d.categories && d.tabs) {
-            setCategories(d.categories);
+          if (d.categories && Array.isArray(d.tabs) && d.tabs.length) {
+            setCategories(ensureFallbackCategory(d.categories));
             if (d.goals) setGoalRoot(d.goals);
-            const restored = await Promise.all(
+            const restored: VideoTab[] = await Promise.all(
               d.tabs.map(async (tab: VideoTab) => {
                 if (!tab.videoId) return { ...tab, videoSrc: null };
-                const blob = await getVideoFromDB(tab.videoId);
-                return blob
-                  ? { ...tab, videoSrc: URL.createObjectURL(blob) }
-                  : { ...tab, videoSrc: null };
+                try {
+                  const blob = await getVideoFromDB(tab.videoId);
+                  return blob
+                    ? { ...tab, videoSrc: URL.createObjectURL(blob) }
+                    : { ...tab, videoSrc: null };
+                } catch {
+                  return { ...tab, videoSrc: null };
+                }
               }),
             );
             setTabs(restored);
-            if (restored.length) setActiveTabId(restored[0].id);
-            alert("復元しました！");
+            setActiveTabId((prev) =>
+              restored.some((t) => t.id === prev) ? prev : restored[0].id,
+            );
+            setCompareTabId((prev) =>
+              prev && restored.some((t) => t.id === prev) ? prev : null,
+            );
+            alert(
+              "設定を復元しました。動画本体はこのブラウザに保存されているものだけが復元されます。",
+            );
+          } else {
+            alert("バックアップの形式が正しくありません");
           }
         } catch {
           alert("読み込み失敗");
         }
       };
       reader.readAsText(file);
-      e.target.value = "";
     },
     [],
   );
@@ -1404,13 +1794,8 @@ export default function VideoAnalyzer() {
       alert("ファイルが見つかりません");
       return;
     }
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = activeTab.name.includes(".")
-      ? activeTab.name
-      : `${activeTab.name}.mp4`;
-    a.click();
-  }, [activeTab]);
+    downloadBlob(blob, withExt(activeTab.name, blob));
+  }, [activeTab, downloadBlob]);
 
   if (!isLoaded) return <div className="min-h-screen bg-[#0b0b0f]" />;
 
@@ -1418,6 +1803,8 @@ export default function VideoAnalyzer() {
 
   return (
     <div className="min-h-screen bg-[#0b0b0f] text-zinc-100 flex flex-col items-center justify-start p-2 md:p-6 font-sans select-none">
+      <style>{GLOBAL_CSS}</style>
+
       {/* ── Header Navigation ── */}
       <div className="w-full max-w-6xl mb-4 flex items-center justify-between bg-[#121218] border border-zinc-800/50 px-4 py-3 rounded-2xl shadow-lg">
         <div
@@ -1502,7 +1889,7 @@ export default function VideoAnalyzer() {
             {[
               {
                 label: "総セッション数",
-                value: tabs.filter((t) => !t.isClip).length,
+                value: sessionTabs.length,
                 unit: "動画",
                 color: "text-white",
               },
@@ -1614,10 +2001,7 @@ export default function VideoAnalyzer() {
                       {cat}
                     </h3>
                     <span className="text-[10px] font-mono text-zinc-500">
-                      {
-                        tabs.filter((t) => t.category === cat && !t.isClip)
-                          .length
-                      }{" "}
+                      {sessionTabs.filter((t) => t.category === cat).length}{" "}
                       セッション
                     </span>
                   </div>
@@ -1631,39 +2015,37 @@ export default function VideoAnalyzer() {
               <Clock size={12} className="text-emerald-400" /> 最近のセッション
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {tabs
-                .filter((t) => !t.isClip)
-                .map((tab) => (
-                  <div
-                    key={tab.id}
-                    onClick={() => {
-                      setActiveTabId(tab.id);
-                      setView("analyzer");
-                    }}
-                    className={`bg-[#121218] border p-4 rounded-2xl cursor-pointer transition-all flex flex-col justify-between gap-4 h-32 relative overflow-hidden group ${tab.id === activeTabId ? "border-cyan-500/40 shadow-md shadow-cyan-500/5 bg-[#191924]/40" : "border-zinc-800/50 hover:border-zinc-700"}`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="space-y-1">
-                        <span className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-950 border border-zinc-800 rounded text-cyan-400 uppercase font-mono tracking-wider">
-                          {tab.category}
-                        </span>
-                        <h3 className="text-xs font-bold text-zinc-100 line-clamp-1 pt-1 group-hover:text-cyan-400 transition-colors">
-                          {tab.name}
-                        </h3>
-                      </div>
-                      <div className="text-[10px] text-zinc-500 font-medium flex items-center gap-1 bg-black/30 px-2 py-0.5 rounded-lg border border-zinc-900">
-                        {tab.videoSrc ? "🎥 動画あり" : "📁 枠のみ"}
-                      </div>
+              {sessionTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveTabId(tab.id);
+                    setView("analyzer");
+                  }}
+                  className={`bg-[#121218] border p-4 rounded-2xl cursor-pointer transition-all flex flex-col justify-between gap-4 h-32 relative overflow-hidden group ${tab.id === effectiveActiveId ? "border-cyan-500/40 shadow-md shadow-cyan-500/5 bg-[#191924]/40" : "border-zinc-800/50 hover:border-zinc-700"}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 bg-zinc-950 border border-zinc-800 rounded text-cyan-400 uppercase font-mono tracking-wider">
+                        {tab.category}
+                      </span>
+                      <h3 className="text-xs font-bold text-zinc-100 line-clamp-1 pt-1 group-hover:text-cyan-400 transition-colors">
+                        {tab.name}
+                      </h3>
                     </div>
-                    <p className="text-[11px] text-zinc-500 line-clamp-2 italic leading-relaxed">
-                      {tab.notes ? tab.notes : "メモはまだありません。"}
-                    </p>
-                    <div className="absolute right-3 bottom-3 opacity-0 group-hover:opacity-100 transition-opacity text-cyan-400 flex items-center gap-1 text-[10px] font-bold">
-                      <span>解析を開く</span>
-                      <ArrowRight size={12} />
+                    <div className="text-[10px] text-zinc-500 font-medium flex items-center gap-1 bg-black/30 px-2 py-0.5 rounded-lg border border-zinc-900">
+                      {tab.videoSrc ? "🎥 動画あり" : "📁 枠のみ"}
                     </div>
                   </div>
-                ))}
+                  <p className="text-[11px] text-zinc-500 line-clamp-2 italic leading-relaxed">
+                    {tab.notes ? tab.notes : "メモはまだありません。"}
+                  </p>
+                  <div className="absolute right-3 bottom-3 opacity-0 group-hover:opacity-100 transition-opacity text-cyan-400 flex items-center gap-1 text-[10px] font-bold">
+                    <span>解析を開く</span>
+                    <ArrowRight size={12} />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -1686,10 +2068,11 @@ export default function VideoAnalyzer() {
             </div>
             <button
               onClick={exportBackup}
+              title="メモ・フォルダ・目標をJSONで保存します（動画本体は含まれません）"
               className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all"
             >
               <Save size={12} className="text-emerald-400" />
-              <span>保存</span>
+              <span>設定保存</span>
             </button>
           </div>
           <div className="bg-[#0b0b0f]/60 border border-zinc-800/50 rounded-2xl p-2 md:p-4 min-h-[400px] overflow-x-auto">
@@ -1711,7 +2094,7 @@ export default function VideoAnalyzer() {
         <div className="w-full max-w-6xl bg-[#121218] border border-zinc-800/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-fadeIn">
           {/* フォルダバー */}
           <div className="bg-[#191924] border-b border-zinc-800/50 p-2 flex flex-col md:flex-row md:items-center gap-2 justify-between">
-            <div className="flex items-center gap-1 overflow-x-auto">
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
               <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-zinc-800 text-xs whitespace-nowrap">
                 <div className="flex items-center gap-1 px-2 text-zinc-400 font-bold border-r border-zinc-800 mr-1">
                   <Folder size={12} className="text-cyan-400" />
@@ -1746,14 +2129,18 @@ export default function VideoAnalyzer() {
               </button>
               <button
                 onClick={exportBackup}
+                title="メモ・フォルダ・目標をJSONで保存します（動画本体は含まれません）"
                 className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all"
               >
                 <Save size={12} className="text-emerald-400" />
-                <span>保存</span>
+                <span>設定保存</span>
               </button>
-              <label className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer">
+              <label
+                title="保存したJSONから設定を復元します（動画本体はこのブラウザ内のものだけ）"
+                className="bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 p-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all cursor-pointer"
+              >
                 <FolderOpen size={12} className="text-sky-400" />
-                <span>復元</span>
+                <span>設定復元</span>
                 <input
                   type="file"
                   accept=".json"
@@ -1774,7 +2161,7 @@ export default function VideoAnalyzer() {
           {/* クリップパネル */}
           {showClipsPanel && (
             <div className="bg-[#0b0b0f] border-b border-zinc-800/50 p-3 space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2">
                   <Film size={13} className="text-red-400" />
                   <span className="text-xs font-bold text-red-400 uppercase tracking-wider">
@@ -1786,24 +2173,47 @@ export default function VideoAnalyzer() {
                 </div>
                 {activeTab?.loopStart !== null &&
                   activeTab?.loopEnd !== null && (
-                    <button
-                      onClick={trimAndSaveClip}
-                      disabled={
-                        trimStatus === "loading" || trimStatus === "trimming"
-                      }
-                      className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 text-black text-xs font-black px-3 py-1 rounded-lg transition-all flex items-center gap-1 shadow-sm"
-                    >
-                      {trimStatus === "trimming" ? (
-                        <RefreshCw size={12} className="animate-spin" />
-                      ) : (
-                        <Film size={12} />
-                      )}
-                      <span>
-                        {trimStatus === "trimming"
-                          ? "切り出し中..."
-                          : "AB区間を高速切り出し"}
-                      </span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <label
+                        className="flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer"
+                        title="オンにすると再エンコードして正確な位置で切り出します（遅くなります）"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={accurateTrim}
+                          onChange={(e) => setAccurateTrim(e.target.checked)}
+                          className="accent-cyan-400"
+                        />
+                        正確に切り出す（遅い）
+                      </label>
+                      <button
+                        onClick={trimAndSaveClip}
+                        disabled={
+                          trimStatus === "loading" || trimStatus === "trimming"
+                        }
+                        className="bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 text-black text-xs font-black px-3 py-1 rounded-lg transition-all flex items-center gap-1 shadow-sm"
+                      >
+                        {trimStatus === "trimming" ||
+                        trimStatus === "loading" ? (
+                          <RefreshCw size={12} className="animate-spin" />
+                        ) : (
+                          <Film size={12} />
+                        )}
+                        <span>
+                          {trimStatus === "loading"
+                            ? "FFmpeg読込中..."
+                            : trimStatus === "trimming"
+                              ? "切り出し中..."
+                              : trimStatus === "done"
+                                ? "保存しました"
+                                : trimStatus === "error"
+                                  ? "失敗しました"
+                                  : accurateTrim
+                                    ? "AB区間を切り出し"
+                                    : "AB区間を高速切り出し"}
+                        </span>
+                      </button>
+                    </div>
                   )}
               </div>
               {clipTabs.length === 0 ? (
@@ -1815,7 +2225,7 @@ export default function VideoAnalyzer() {
                   {clipTabs.map((tab) => (
                     <div
                       key={tab.id}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs cursor-pointer transition-all ${tab.id === activeTabId ? "bg-red-500/15 border-red-500/40 text-red-300" : "bg-[#121218] border-zinc-800 text-zinc-400 hover:border-zinc-600"}`}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs cursor-pointer transition-all ${tab.id === effectiveActiveId ? "bg-red-500/15 border-red-500/40 text-red-300" : "bg-[#121218] border-zinc-800 text-zinc-400 hover:border-zinc-600"}`}
                       onClick={() => {
                         setActiveTabId(tab.id);
                         setShowClipsPanel(false);
@@ -1837,6 +2247,7 @@ export default function VideoAnalyzer() {
                       </button>
                       <button
                         onClick={(e) => closeTab(tab.id, e)}
+                        title="削除"
                         className="text-zinc-600 hover:text-red-400 transition-colors"
                       >
                         <X size={11} />
@@ -1869,49 +2280,59 @@ export default function VideoAnalyzer() {
                 </button>
               </div>
               <div className="flex flex-wrap gap-2 pt-1 border-t border-zinc-800/40">
-                {categories.map((cat) => (
-                  <div
-                    key={cat}
-                    className="flex items-center gap-1 bg-[#121218] border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300"
-                  >
-                    <input
-                      type="text"
-                      defaultValue={cat}
-                      onBlur={(e) => {
-                        const n = e.target.value.trim();
-                        if (!n || n === cat) {
-                          e.target.value = cat;
-                          return;
+                {categories.map((cat) => {
+                  const isFallback = cat === FALLBACK_CATEGORY;
+                  return (
+                    <div
+                      key={cat}
+                      className="flex items-center gap-1 bg-[#121218] border border-zinc-800 px-2.5 py-1 rounded-xl text-xs text-zinc-300"
+                    >
+                      <input
+                        type="text"
+                        defaultValue={cat}
+                        readOnly={isFallback}
+                        title={
+                          isFallback
+                            ? "「その他」は削除・名前変更できません"
+                            : undefined
                         }
-                        if (categories.includes(n)) {
-                          alert("そのフォルダ名は既に存在します");
-                          e.target.value = cat;
-                          return;
+                        onBlur={(e) => {
+                          if (isFallback) return;
+                          const n = e.target.value.trim();
+                          if (!n || n === cat) {
+                            e.target.value = cat;
+                            return;
+                          }
+                          if (categories.includes(n) || n === "すべて") {
+                            alert("そのフォルダ名は使用できません");
+                            e.target.value = cat;
+                            return;
+                          }
+                          setCategories(
+                            categories.map((c) => (c === cat ? n : c)),
+                          );
+                          setTabs(
+                            tabs.map((t) =>
+                              t.category === cat ? { ...t, category: n } : t,
+                            ),
+                          );
+                          if (currentCategory === cat) setCurrentCategory(n);
+                        }}
+                        onKeyDown={(e) =>
+                          e.key === "Enter" && e.currentTarget.blur()
                         }
-                        setCategories(
-                          categories.map((c) => (c === cat ? n : c)),
-                        );
-                        setTabs(
-                          tabs.map((t) =>
-                            t.category === cat ? { ...t, category: n } : t,
-                          ),
-                        );
-                        if (currentCategory === cat) setCurrentCategory(n);
-                      }}
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && e.currentTarget.blur()
-                      }
-                      className="bg-transparent font-medium focus:outline-none w-20 md:w-24 text-zinc-200 border-b border-transparent focus:border-cyan-500/50 transition-all"
-                    />
-                    {categories.length > 1 && (
-                      <X
-                        size={12}
-                        className="text-zinc-500 hover:text-red-400 cursor-pointer ml-1"
-                        onClick={() => deleteCategory(cat)}
+                        className={`bg-transparent font-medium focus:outline-none w-20 md:w-24 border-b border-transparent focus:border-cyan-500/50 transition-all ${isFallback ? "text-zinc-500" : "text-zinc-200"}`}
                       />
-                    )}
-                  </div>
-                ))}
+                      {!isFallback && categories.length > 1 && (
+                        <X
+                          size={12}
+                          className="text-zinc-500 hover:text-red-400 cursor-pointer ml-1"
+                          onClick={() => deleteCategory(cat)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1923,7 +2344,7 @@ export default function VideoAnalyzer() {
                 <div
                   key={tab.id}
                   onClick={() => setActiveTabId(tab.id)}
-                  className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border shrink-0 ${tab.id === activeTabId ? "bg-[#191924] text-white border-zinc-700 shadow-sm" : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"}`}
+                  className={`flex items-center gap-2 px-3 py-1.5 md:py-2 rounded-xl text-xs font-medium cursor-pointer transition-all border shrink-0 ${tab.id === effectiveActiveId ? "bg-[#191924] text-white border-zinc-700 shadow-sm" : "text-zinc-500 hover:text-zinc-300 bg-transparent border-transparent"}`}
                 >
                   {tab.isClip && (
                     <div className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
@@ -1995,7 +2416,7 @@ export default function VideoAnalyzer() {
                       <span
                         className="flex items-center gap-1"
                         onClick={(e) => {
-                          if (tab.id === activeTabId) {
+                          if (tab.id === effectiveActiveId) {
                             e.stopPropagation();
                             startRename(tab, e);
                           }
@@ -2064,8 +2485,8 @@ export default function VideoAnalyzer() {
                     <VideoPlayer
                       vRef={videoRef}
                       tab={activeTab}
-                      onTimeUpdate={handleTimeUpdate}
                       compareMode={compareMode}
+                      compareTab={compareTab}
                       setIsPlaying={setIsPlaying}
                       setDuration={setDuration}
                       setCompareDuration={setCompareDuration}
@@ -2129,37 +2550,25 @@ export default function VideoAnalyzer() {
                         tab={compareTab}
                         controls={compareControls}
                         isCompare
-                        onTimeUpdate={handleCompareTimeUpdate}
                         compareMode={compareMode}
                         compareTab={compareTab}
                         setIsPlaying={setIsPlaying}
                         setDuration={setDuration}
                         setCompareDuration={setCompareDuration}
                         togglePlay={togglePlay}
+                        toggleComparePlay={toggleComparePlay}
                         syncPlay={syncPlay}
                       />
                     ) : (
                       <div
                         onClick={() => {
                           if (!compareTabId) {
-                            const t: VideoTab = {
-                              ...makeDefaultTab(0),
-                              id: `tab-${Date.now()}`,
-                              name: `比較 ${tabs.length + 1}`,
-                              category:
-                                activeTab?.category ??
-                                categories[0] ??
-                                "その他",
-                            };
+                            const t = makeCompareSlot();
                             setTabs((prev) => [...prev, t]);
+                            compareTabIdRef.current = t.id;
                             setCompareTabId(t.id);
-                            setTimeout(
-                              () => compareFileInputRef.current?.click(),
-                              50,
-                            );
-                          } else {
-                            compareFileInputRef.current?.click();
                           }
+                          compareFileInputRef.current?.click();
                         }}
                         className="flex flex-col items-center justify-center gap-3 cursor-pointer text-xs p-8 w-full h-full select-none"
                       >
@@ -2190,67 +2599,14 @@ export default function VideoAnalyzer() {
               {activeTab?.videoSrc && (
                 <div className="p-3 md:p-4 bg-[#121218] space-y-4 border-t border-zinc-800/50">
                   {/* シークバー */}
-                  <div className="flex items-center gap-3">
-                    <span className="text-[10px] font-mono text-zinc-400 w-8">
-                      {formatTime(currentTime)}
-                    </span>
-                    <div className="relative flex-1 h-6 flex items-center">
-                      <div className="absolute left-0 right-0 h-1 bg-zinc-800 rounded-lg pointer-events-none" />
-                      {activeTab.loopStart !== null &&
-                        activeTab.loopEnd !== null &&
-                        duration > 0 && (
-                          <div
-                            className="absolute h-1 bg-cyan-500/40 pointer-events-none"
-                            style={{
-                              left: `${(activeTab.loopStart / duration) * 100}%`,
-                              width: `${((activeTab.loopEnd - activeTab.loopStart) / duration) * 100}%`,
-                            }}
-                          />
-                        )}
-                      {activeTab.loopStart !== null && duration > 0 && (
-                        <div
-                          className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10"
-                          style={{
-                            left: `${(activeTab.loopStart / duration) * 100}%`,
-                          }}
-                        />
-                      )}
-                      {activeTab.loopEnd !== null && duration > 0 && (
-                        <div
-                          className="absolute h-3 w-0.5 bg-cyan-400 pointer-events-none z-10"
-                          style={{
-                            left: `${(activeTab.loopEnd / duration) * 100}%`,
-                          }}
-                        />
-                      )}
-                      <input
-                        type="range"
-                        min={0}
-                        max={duration || 100}
-                        step={0.01}
-                        value={currentTime}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          setCurrentTime(v);
-                          if (videoRef.current)
-                            videoRef.current.currentTime = v;
-                          if (
-                            compareMode &&
-                            syncPlay &&
-                            compareVideoRef.current
-                          )
-                            compareVideoRef.current.currentTime = Math.max(
-                              0,
-                              v + compareControls.syncOffset,
-                            );
-                        }}
-                        className="w-full accent-white bg-transparent h-6 appearance-none cursor-pointer relative z-20 focus:outline-none"
-                      />
-                    </div>
-                    <span className="text-[10px] font-mono text-zinc-400 w-8 text-right">
-                      {formatTime(duration)}
-                    </span>
-                  </div>
+                  <SeekBar
+                    videoRef={videoRef}
+                    videoSrc={activeTab.videoSrc}
+                    duration={duration}
+                    loopStart={activeTab.loopStart}
+                    loopEnd={activeTab.loopEnd}
+                    onSeek={seekTo}
+                  />
 
                   {/* 比較モードトグル */}
                   <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80 flex flex-wrap items-center gap-2 text-xs">
@@ -2258,7 +2614,9 @@ export default function VideoAnalyzer() {
                       onClick={() => {
                         setCompareMode(!compareMode);
                         if (!compareTabId && tabs.length > 1) {
-                          const o = tabs.find((t) => t.id !== activeTabId);
+                          const o = tabs.find(
+                            (t) => t.id !== effectiveActiveId,
+                          );
                           if (o) setCompareTabId(o.id);
                         }
                       }}
@@ -2277,7 +2635,7 @@ export default function VideoAnalyzer() {
                         >
                           <option value="">比較する動画を選択</option>
                           {tabs
-                            .filter((t) => t.id !== activeTabId)
+                            .filter((t) => t.id !== effectiveActiveId)
                             .map((t) => (
                               <option key={t.id} value={t.id}>
                                 {t.isClip ? "🔴" : ""} [{t.category}] {t.name}
@@ -2290,6 +2648,14 @@ export default function VideoAnalyzer() {
                         >
                           {syncPlay ? "🔗 同期: ON" : "🔓 個別再生"}
                         </button>
+                        {!syncPlay && compareTab?.videoSrc && (
+                          <button
+                            onClick={toggleComparePlay}
+                            className="px-2.5 py-1 rounded-lg text-[10px] font-bold border bg-violet-500/10 text-violet-300 border-violet-500/30 hover:bg-violet-500/20 transition-all"
+                          >
+                            比較側 再生/停止
+                          </button>
+                        )}
                         <button
                           onClick={() => setShowComparePanel(!showComparePanel)}
                           className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all ${showComparePanel ? "bg-violet-500/20 text-violet-300 border-violet-500/40" : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200"}`}
@@ -2507,7 +2873,11 @@ export default function VideoAnalyzer() {
                           <input
                             type="range"
                             min={0}
-                            max={compareDuration || 100}
+                            max={
+                              isFinite(compareDuration) && compareDuration > 0
+                                ? compareDuration
+                                : 100
+                            }
                             step={0.01}
                             defaultValue={0}
                             onChange={(e) => {
@@ -2578,7 +2948,9 @@ export default function VideoAnalyzer() {
                       <button
                         onClick={isRecording ? stopRecording : startRecording}
                         title={
-                          isRecording ? "録画停止・アプリに保存" : "録画開始"
+                          isRecording
+                            ? "録画停止・アプリに保存"
+                            : "録画開始（ミラー・回転・ズームも反映）"
                         }
                         className={`p-2 rounded-lg border flex items-center justify-center transition-all ${isRecording ? "bg-red-500/20 border-red-500/50 text-red-400" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-red-400 hover:border-red-500/40"}`}
                       >
@@ -2657,10 +3029,11 @@ export default function VideoAnalyzer() {
                       </button>
                       <button
                         onClick={downloadCurrentVideo}
+                        title="この動画ファイルをダウンロード"
                         className="px-2.5 py-1 rounded-lg flex items-center gap-1 text-zinc-400 hover:text-zinc-200"
                       >
                         <Download size={12} />
-                        保存
+                        動画保存
                       </button>
                     </div>
                   </div>
